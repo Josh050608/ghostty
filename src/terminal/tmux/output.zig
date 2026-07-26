@@ -36,6 +36,30 @@ pub fn parseFormatStruct(
     return result;
 }
 
+/// Same as parseFormatStruct but the LAST field consumes the rest of
+/// the string (it may contain the delimiter). Use this when the final
+/// variable can contain arbitrary text, e.g. window_name.
+pub fn parseFormatStructRest(
+    comptime T: type,
+    str: []const u8,
+    delimiter: u8,
+) ParseError!T {
+    const fields = @typeInfo(T).@"struct".fields;
+    var it = std.mem.splitScalar(u8, str, delimiter);
+    var result: T = undefined;
+    inline for (fields, 0..) |field, i| {
+        const part = if (comptime i == fields.len - 1)
+            it.rest()
+        else
+            it.next() orelse return error.MissingEntry;
+        @field(result, field.name) = Variable.parse(
+            @field(Variable, field.name),
+            part,
+        ) catch return error.FormatError;
+    }
+    return result;
+}
+
 pub fn comptimeFormat(
     comptime vars: []const Variable,
     comptime delimiter: u8,
@@ -161,6 +185,10 @@ pub const Variable = enum {
     /// encodes pane dimensions as `WxH,X,Y[,ID]` with `{...}` for horizontal
     /// splits and `[...]` for vertical splits.
     window_layout,
+    /// Window name. User-settable and may contain any character,
+    /// including format delimiters, so it must be the LAST variable
+    /// in a format parsed with parseFormatStructRest.
+    window_name,
     /// Pane wrap flag.
     wrap_flag,
 
@@ -211,6 +239,7 @@ pub const Variable = enum {
             .pane_tabs,
             .version,
             .window_layout,
+            .window_name,
             => value,
         };
     }
@@ -252,6 +281,7 @@ pub const Variable = enum {
             .pane_tabs,
             .version,
             .window_layout,
+            .window_name,
             => []const u8,
         };
     }
@@ -581,4 +611,17 @@ test "format empty variables" {
 
 test "format all variables" {
     try testFormat(&.{ .session_id, .window_id, .window_width, .window_height, .window_layout }, ' ', "#{session_id} #{window_id} #{window_width} #{window_height} #{window_layout}");
+}
+
+test "parseFormatStructRest last field takes remainder" {
+    const T = FormatStruct(&.{ .window_id, .window_name });
+    const v = try parseFormatStructRest(T, "@5 my window name", ' ');
+    try std.testing.expectEqual(@as(usize, 5), v.window_id);
+    try std.testing.expectEqualStrings("my window name", v.window_name);
+}
+
+test "parseFormatStructRest empty last field" {
+    const T = FormatStruct(&.{ .window_id, .window_name });
+    const v = try parseFormatStructRest(T, "@5 ", ' ');
+    try std.testing.expectEqualStrings("", v.window_name);
 }
