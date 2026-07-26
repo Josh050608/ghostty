@@ -1743,7 +1743,7 @@ test "serialize tmux windows flattens layout tree" {
     const w = ev.event.windows;
     try std.testing.expectEqual(@as(usize, 1), w.windows.len);
     try std.testing.expectEqualStrings("main", w.windows[0].name);
-    // 根节点 + 两个子节点
+    // root node + two child nodes
     try std.testing.expectEqual(@as(usize, 3), w.nodes.len);
     const root = w.nodes[w.windows[0].root];
     try std.testing.expect(root.kind == .horizontal);
@@ -1751,4 +1751,75 @@ test "serialize tmux windows flattens layout tree" {
     const c0 = w.nodes[root.children_start];
     try std.testing.expect(c0.kind == .pane);
     try std.testing.expectEqual(@as(usize, 1), c0.pane_id);
+}
+
+test "serialize tmux windows flattens non-contiguous layout" {
+    // Layout: H[ pane1, V[ pane2, pane3 ] ]
+    // The vertical split's children are not contiguous with the top-level
+    // horizontal split's children, so flattenLayout must emit shallow copies
+    // to create a contiguous children run for the horizontal node.
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    const Layout = terminal.tmux.Layout;
+
+    // Inner vertical children (pane2, pane3).
+    const v_children: [2]Layout = .{
+        .{ .width = 39, .height = 12, .x = 41, .y = 0, .content = .{ .pane = 2 } },
+        .{ .width = 39, .height = 11, .x = 41, .y = 13, .content = .{ .pane = 3 } },
+    };
+    // Outer horizontal children: pane1 and the vertical split above.
+    const h_children: [2]Layout = .{
+        .{ .width = 40, .height = 24, .x = 0, .y = 0, .content = .{ .pane = 1 } },
+        .{ .width = 39, .height = 24, .x = 41, .y = 0, .content = .{ .vertical = &v_children } },
+    };
+    const windows: [1]terminal.tmux.Viewer.Window = .{.{
+        .id = 1,
+        .name = "nested",
+        .width = 80,
+        .height = 24,
+        .layout_arena = .{},
+        .layout = .{
+            .width = 80,
+            .height = 24,
+            .x = 0,
+            .y = 0,
+            .content = .{ .horizontal = &h_children },
+        },
+    }};
+
+    const ev = try StreamHandler.serializeTmuxWindowsAlloc(alloc, &windows);
+    defer ev.deinit();
+
+    const w = ev.event.windows;
+    try std.testing.expectEqual(@as(usize, 1), w.windows.len);
+
+    // Root must be horizontal with exactly 2 children.
+    const root = w.nodes[w.windows[0].root];
+    try std.testing.expect(root.kind == .horizontal);
+    try std.testing.expectEqual(@as(usize, 2), root.children_len);
+
+    // Children run must be within bounds.
+    try std.testing.expect(root.children_start + root.children_len <= w.nodes.len);
+
+    // First child of root is pane1.
+    const h_c0 = w.nodes[root.children_start];
+    try std.testing.expect(h_c0.kind == .pane);
+    try std.testing.expectEqual(@as(usize, 1), h_c0.pane_id);
+
+    // Second child of root is the vertical split.
+    const h_c1 = w.nodes[root.children_start + 1];
+    try std.testing.expect(h_c1.kind == .vertical);
+    try std.testing.expectEqual(@as(usize, 2), h_c1.children_len);
+
+    // Vertical split's children run must be within bounds.
+    try std.testing.expect(h_c1.children_start + h_c1.children_len <= w.nodes.len);
+
+    // Vertical split's children are pane2 and pane3.
+    const v_c0 = w.nodes[h_c1.children_start];
+    const v_c1 = w.nodes[h_c1.children_start + 1];
+    try std.testing.expect(v_c0.kind == .pane);
+    try std.testing.expectEqual(@as(usize, 2), v_c0.pane_id);
+    try std.testing.expect(v_c1.kind == .pane);
+    try std.testing.expectEqual(@as(usize, 3), v_c1.pane_id);
 }

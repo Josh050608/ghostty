@@ -731,6 +731,11 @@ pub fn tmuxReplaceTerminal(self: *Termio, t: *terminalpkg.Terminal) void {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         self.terminal.deinit(self.alloc);
+        // Swap in the captured terminal. Resize is deliberately NOT
+        // performed here: the pane surface's first layout pass sends a
+        // normal resize message that corrects the grid; resizing here
+        // would require thread context (pty fd, subprocess signals) that
+        // this path does not have.
         self.terminal = t.*;
     }
     self.alloc.destroy(t);

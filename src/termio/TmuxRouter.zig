@@ -4,12 +4,31 @@
 //! Threading contract:
 //!   - register/unregister/sendCommand: any thread (pane IO threads).
 //!   - drainEvents/route/replaceTerminal: host IO thread only.
-//!   - route() calls the pane's Termio.processOutput while holding our
-//!     mutex; unregister() blocks on the same mutex, so after it returns
-//!     the pane's Termio is never touched again by the router.
-//!   - Lock order: host renderer mutex -> router mutex -> pane renderer
-//!     mutex. Pane threads must never hold a renderer mutex when calling
-//!     into the router.
+//!
+//! Two-mutex discipline (prevents ABBA deadlock):
+//!   - events_mutex: guards the `events` list.
+//!     Users: sendCommand, drainEvents, and the event-append part of
+//!     register/unregister.
+//!   - panes_mutex: guards the `panes` map.
+//!     Users: route, replaceTerminal, and the map part of
+//!     register/unregister.
+//!
+//! Why two mutexes?
+//!   Pane IO threads call sendCommand (and indirectly via sizeReportLocked /
+//!   colorSchemeReportLocked) while holding their renderer mutex.  The old
+//!   single-mutex design allowed route() to hold the router mutex while
+//!   calling processOutput -> pane renderer mutex, creating an ABBA cycle:
+//!     pane-renderer -> router  AND  router -> pane-renderer.
+//!   With the split, events_mutex is never held while acquiring any renderer
+//!   mutex, so no cycle is possible.
+//!
+//!   register/unregister acquire the two locks SEQUENTIALLY (map op under
+//!   panes_mutex, release, then event append under events_mutex, release,
+//!   then notify) — they are never nested.  Both are called from
+//!   threadEnter/threadExit, which never hold a renderer mutex.
+//!
+//!   unref teardown takes neither lock: refcount == 0 guarantees
+//!   exclusivity.
 
 const TmuxRouter = @This();
 
@@ -22,7 +41,13 @@ const terminalpkg = @import("../terminal/main.zig");
 
 const log = std.log.scoped(.tmux_router);
 
-mutex: std.Io.Mutex = .init,
+/// Guards `events`. Held only by sendCommand, drainEvents, and the
+/// event-append portion of register/unregister. Never held while
+/// acquiring any renderer mutex.
+events_mutex: std.Io.Mutex = .init,
+/// Guards `panes`. Held only by route, replaceTerminal, and the
+/// map portion of register/unregister.
+panes_mutex: std.Io.Mutex = .init,
 alloc: Allocator,
 refs: std.atomic.Value(usize),
 wakeup: xev.Async,
@@ -62,10 +87,16 @@ pub fn register(
     pane_id: usize,
     io: *termio.Termio,
 ) Allocator.Error!void {
+    // Map op under panes_mutex (never nested with events_mutex).
     {
-        self.mutex.lockUncancelable(global.io());
-        defer self.mutex.unlock(global.io());
+        self.panes_mutex.lockUncancelable(global.io());
+        defer self.panes_mutex.unlock(global.io());
         try self.panes.put(self.alloc, pane_id, io);
+    }
+    // Event append under events_mutex (never nested with panes_mutex).
+    {
+        self.events_mutex.lockUncancelable(global.io());
+        defer self.events_mutex.unlock(global.io());
         try self.events.append(self.alloc, .{ .registered = pane_id });
     }
     self.wakeup.notify() catch |err| {
@@ -74,10 +105,16 @@ pub fn register(
 }
 
 pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
+    // Map op under panes_mutex (never nested with events_mutex).
     {
-        self.mutex.lockUncancelable(global.io());
-        defer self.mutex.unlock(global.io());
+        self.panes_mutex.lockUncancelable(global.io());
+        defer self.panes_mutex.unlock(global.io());
         _ = self.panes.remove(pane_id);
+    }
+    // Event append under events_mutex (never nested with panes_mutex).
+    {
+        self.events_mutex.lockUncancelable(global.io());
+        defer self.events_mutex.unlock(global.io());
         self.events.append(self.alloc, .{ .unregistered = pane_id }) catch |err| {
             log.warn("tmux router event dropped err={}", .{err});
         };
@@ -87,8 +124,8 @@ pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
 
 pub fn sendCommand(self: *TmuxRouter, cmd: []const u8) Allocator.Error!void {
     {
-        self.mutex.lockUncancelable(global.io());
-        defer self.mutex.unlock(global.io());
+        self.events_mutex.lockUncancelable(global.io());
+        defer self.events_mutex.unlock(global.io());
         const owned = try self.alloc.dupe(u8, cmd);
         errdefer self.alloc.free(owned);
         try self.events.append(self.alloc, .{ .command = owned });
@@ -108,16 +145,16 @@ pub fn drainEvents(
     out: *std.ArrayListUnmanaged(Event),
     alloc: Allocator,
 ) Allocator.Error!void {
-    self.mutex.lockUncancelable(global.io());
-    defer self.mutex.unlock(global.io());
+    self.events_mutex.lockUncancelable(global.io());
+    defer self.events_mutex.unlock(global.io());
     try out.appendSlice(alloc, self.events.items);
     self.events.clearRetainingCapacity();
 }
 
 /// Host IO thread: feed pane output. Returns false if unknown pane.
 pub fn route(self: *TmuxRouter, pane_id: usize, data: []const u8) bool {
-    self.mutex.lockUncancelable(global.io());
-    defer self.mutex.unlock(global.io());
+    self.panes_mutex.lockUncancelable(global.io());
+    defer self.panes_mutex.unlock(global.io());
     const io = self.panes.get(pane_id) orelse return false;
     io.processOutput(data);
     io.renderer_wakeup.notify() catch {};
@@ -132,8 +169,8 @@ pub fn replaceTerminal(
     pane_id: usize,
     t: *terminalpkg.Terminal,
 ) bool {
-    self.mutex.lockUncancelable(global.io());
-    defer self.mutex.unlock(global.io());
+    self.panes_mutex.lockUncancelable(global.io());
+    defer self.panes_mutex.unlock(global.io());
     const io = self.panes.get(pane_id) orelse return false;
     io.tmuxReplaceTerminal(t); // Task 6 restores the real body
     return true;
@@ -169,5 +206,5 @@ test "router refcount" {
     const router = try TmuxRouter.create(alloc, wakeup);
     router.ref();
     router.unref();
-    router.unref(); // 归零自毁；测试通过 = 无泄漏无 double-free
+    router.unref(); // drops to zero and self-destroys; no leak or double-free
 }
