@@ -1174,6 +1174,9 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .selected = v },
             );
         },
+
+        // Task 9 forwards this to the apprt.
+        .tmux => |ev| ev.deinit(),
     }
 }
 

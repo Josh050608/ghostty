@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 
 const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
@@ -9,6 +10,72 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
+
+/// A heap-allocated event from the tmux control mode state machine.
+/// All memory (including this struct itself) lives in a single ArenaAllocator;
+/// call deinit() when done — do not touch self afterwards.
+pub const TmuxEvent = struct {
+    alloc: Allocator,
+    arena_state: ArenaAllocator.State,
+    event: Event,
+
+    pub const Event = union(enum) {
+        attach: struct { router: *anyopaque },
+        windows: struct { windows: []const Window, nodes: []const Node },
+        exit,
+    };
+
+    /// Flat window descriptor. root is an index into the nodes array.
+    pub const Window = struct {
+        id: usize,
+        name: [:0]const u8,
+        width: usize,
+        height: usize,
+        root: usize,
+    };
+
+    /// A node in the flattened layout tree.
+    /// Children (if any) occupy nodes[children_start .. children_start + children_len].
+    pub const Node = struct {
+        kind: enum { pane, horizontal, vertical },
+        pane_id: usize, // valid when kind == .pane
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        children_start: usize,
+        children_len: usize,
+    };
+
+    pub fn initExit(gpa: Allocator) Allocator.Error!*TmuxEvent {
+        var arena: ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const ev = try arena.allocator().create(TmuxEvent);
+        ev.* = .{ .alloc = gpa, .arena_state = arena.state, .event = .exit };
+        return ev;
+    }
+
+    pub fn initAttach(
+        gpa: Allocator,
+        router: *anyopaque,
+    ) Allocator.Error!*TmuxEvent {
+        var arena: ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const ev = try arena.allocator().create(TmuxEvent);
+        ev.* = .{
+            .alloc = gpa,
+            .arena_state = arena.state,
+            .event = .{ .attach = .{ .router = router } },
+        };
+        return ev;
+    }
+
+    /// Free all memory including this struct. Do not touch self afterwards.
+    pub fn deinit(self: *TmuxEvent) void {
+        var arena = self.arena_state.promote(self.alloc);
+        arena.deinit(); // frees self too; do not touch self afterwards
+    }
+};
 
 /// The message types that can be sent to a single surface.
 pub const Message = union(enum) {
@@ -107,6 +174,10 @@ pub const Message = union(enum) {
 
     /// Selected search index change
     search_selected: ?usize,
+
+    /// Tmux control mode state change destined for the apprt.
+    /// Receiver must call deinit().
+    tmux: *TmuxEvent,
 
     pub const ReportTitleStyle = enum {
         csi_21_t,

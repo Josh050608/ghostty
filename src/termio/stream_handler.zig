@@ -89,11 +89,16 @@ pub const StreamHandler = struct {
     pub fn deinit(self: *StreamHandler) void {
         self.apc.deinit();
         self.dcs.deinit();
-        if (comptime tmux_enabled) tmux: {
-            const viewer = self.tmux_viewer orelse break :tmux;
-            viewer.deinit();
-            self.alloc.destroy(viewer);
-            self.tmux_viewer = null;
+        if (comptime tmux_enabled) {
+            if (self.tmux_viewer) |viewer| {
+                viewer.deinit();
+                self.alloc.destroy(viewer);
+                self.tmux_viewer = null;
+            }
+            if (self.tmux_router) |router| {
+                router.unref();
+                self.tmux_router = null;
+            }
         }
     }
 
@@ -393,26 +398,36 @@ pub const StreamHandler = struct {
 
                 switch (tmux) {
                     .enter => {
-                        // Setup our viewer state
                         assert(self.tmux_viewer == null);
                         const viewer = try self.alloc.create(terminal.tmux.Viewer);
                         errdefer self.alloc.destroy(viewer);
                         viewer.* = try .init(global.io(), self.alloc);
                         errdefer viewer.deinit();
+
+                        const router = try termio.TmuxRouter.create(
+                            self.alloc,
+                            self.termio_mailbox.spsc.wakeup,
+                        );
+                        errdefer router.unref();
+
+                        // Create the attach event BEFORE assigning our
+                        // fields: on error the errdefers free viewer and
+                        // router, so the fields must not point at them yet.
+                        const ev = try apprt.surface.TmuxEvent.initAttach(
+                            self.alloc,
+                            router,
+                        );
+
                         self.tmux_viewer = viewer;
+                        self.tmux_router = router;
+                        self.surfaceMessageWriter(.{ .tmux = ev });
                         break :tmux;
                     },
 
                     .exit => {
-                        // Free our viewer state if we have one
-                        if (self.tmux_viewer) |viewer| {
-                            viewer.deinit();
-                            self.alloc.destroy(viewer);
-                            self.tmux_viewer = null;
-                        }
-
-                        // And always break since we assert below
-                        // that we're not handling an exit command.
+                        self.tmuxExit();
+                        // Always break since we assert below that we're
+                        // not handling an exit command.
                         break :tmux;
                     },
 
@@ -433,46 +448,7 @@ pub const StreamHandler = struct {
                     break :tmux;
                 };
 
-                for (viewer.next(.{ .tmux = tmux })) |action| {
-                    log.info("tmux viewer action={f}", .{action});
-                    switch (action) {
-                        .exit => {
-                            // We ignore this because we will fully exit when
-                            // our DCS connection ends. We may want to handle
-                            // this in the future to notify our GUI we're
-                            // disconnected though.
-                        },
-
-                        .command => |command| {
-                            assert(command.len > 0);
-                            assert(command[command.len - 1] == '\n');
-                            self.messageWriter(try termio.Message.writeReq(
-                                self.alloc,
-                                command,
-                            ));
-                        },
-
-                        .windows => {
-                            // TODO
-                        },
-
-                        // Bridge handling until the router wiring lands:
-                        // pane output has nowhere to go yet, taken terminals
-                        // must be freed so they don't leak, and dead panes
-                        // are only informational.
-                        .pane_output => {},
-
-                        .pane_take => |take| {
-                            take.terminal.deinit(self.alloc);
-                            self.alloc.destroy(take.terminal);
-                        },
-
-                        .pane_gone => |id| log.info(
-                            "tmux pane gone id={}",
-                            .{id},
-                        ),
-                    }
-                }
+                self.handleTmuxActions(viewer.next(.{ .tmux = tmux }));
             },
 
             .xtgettcap => |*gettcap| {
@@ -555,30 +531,207 @@ pub const StreamHandler = struct {
         }
     }
 
-    /// Feed an input into the tmux viewer and process the resulting
-    /// actions. Task 8 extends this to handle all action types.
+    /// Feed an input into the tmux viewer and process the resulting actions.
     pub fn handleTmuxInput(
         self: *StreamHandler,
         input: terminal.tmux.Viewer.Input,
     ) void {
         if (comptime !tmux_enabled) return;
         const viewer = self.tmux_viewer orelse return;
-        for (viewer.next(input)) |action| switch (action) {
-            .command => |command| {
-                self.messageWriter(termio.Message.writeReq(
-                    self.alloc,
-                    command,
-                ) catch |err| {
-                    log.warn("tmux command dropped err={}", .{err});
-                    return;
-                });
-            },
-            .pane_take => |take| {
-                take.terminal.deinit(self.alloc);
-                self.alloc.destroy(take.terminal);
-            },
-            else => log.info("tmux action (unhandled until task 8)={f}", .{action}),
+        self.handleTmuxActions(viewer.next(input));
+    }
+
+    /// Process a slice of viewer actions. Called from handleTmuxInput and
+    /// from the dcsCommand .tmux notification path.
+    fn handleTmuxActions(
+        self: *StreamHandler,
+        actions: []const terminal.tmux.Viewer.Action,
+    ) void {
+        if (comptime !tmux_enabled) return;
+        for (actions) |action| {
+            log.info("tmux viewer action={f}", .{action});
+            switch (action) {
+                .exit => self.tmuxExit(),
+
+                .command => |command| {
+                    assert(command.len > 0);
+                    assert(command[command.len - 1] == '\n');
+                    self.messageWriter(termio.Message.writeReq(
+                        self.alloc,
+                        command,
+                    ) catch |err| {
+                        log.warn("tmux command dropped err={}", .{err});
+                        continue;
+                    });
+                },
+
+                .windows => |windows| {
+                    const ev = serializeTmuxWindowsAlloc(
+                        self.alloc,
+                        windows,
+                    ) catch |err| {
+                        log.warn("tmux windows event dropped err={}", .{err});
+                        continue;
+                    };
+                    self.surfaceMessageWriter(.{ .tmux = ev });
+                },
+
+                .pane_output => |out| {
+                    const router = self.tmux_router orelse continue;
+                    if (!router.route(out.pane_id, out.data)) {
+                        log.info(
+                            "tmux output for unrouted pane id={}",
+                            .{out.pane_id},
+                        );
+                    }
+                },
+
+                .pane_take => |take| {
+                    const router = self.tmux_router orelse {
+                        take.terminal.deinit(self.alloc);
+                        self.alloc.destroy(take.terminal);
+                        continue;
+                    };
+                    if (!router.replaceTerminal(take.pane_id, take.terminal)) {
+                        take.terminal.deinit(self.alloc);
+                        self.alloc.destroy(take.terminal);
+                    }
+                },
+
+                // Plan 2: GUI will close stale surfaces on windows diff;
+                // for now just log.
+                .pane_gone => |id| log.info("tmux pane gone id={}", .{id}),
+            }
+        }
+    }
+
+    /// Tear down tmux state and notify the apprt surface.
+    fn tmuxExit(self: *StreamHandler) void {
+        if (comptime !tmux_enabled) return;
+
+        if (self.tmux_viewer) |viewer| {
+            viewer.deinit();
+            self.alloc.destroy(viewer);
+            self.tmux_viewer = null;
+        }
+        if (self.tmux_router) |router| {
+            router.unref();
+            self.tmux_router = null;
+        }
+
+        const ev = apprt.surface.TmuxEvent.initExit(self.alloc) catch |err| {
+            log.warn("tmux exit event dropped err={}", .{err});
+            return;
         };
+        self.surfaceMessageWriter(.{ .tmux = ev });
+    }
+
+    /// Serialize viewer Window list into a heap-allocated TmuxEvent.
+    /// All memory lives in a single ArenaAllocator; caller must call
+    /// ev.deinit() when done.
+    pub fn serializeTmuxWindowsAlloc(
+        alloc: Allocator,
+        windows: []const terminal.tmux.Viewer.Window,
+    ) !*apprt.surface.TmuxEvent {
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        var nodes: std.ArrayListUnmanaged(apprt.surface.TmuxEvent.Node) = .empty;
+        var out_windows: std.ArrayListUnmanaged(apprt.surface.TmuxEvent.Window) = .empty;
+        for (windows) |*w| {
+            const root = try flattenLayout(a, &nodes, &w.layout);
+            try out_windows.append(a, .{
+                .id = w.id,
+                .name = try a.dupeZ(u8, w.name),
+                .width = w.width,
+                .height = w.height,
+                .root = root,
+            });
+        }
+
+        const ev = try a.create(apprt.surface.TmuxEvent);
+        ev.* = .{
+            .alloc = alloc,
+            .arena_state = undefined, // set below, after last arena use
+            .event = .{ .windows = .{
+                .windows = out_windows.items,
+                .nodes = nodes.items,
+            } },
+        };
+        ev.arena_state = arena.state;
+        return ev;
+    }
+
+    /// Flatten a layout tree into `nodes` post-order (children first),
+    /// returning the index of this subtree's root node.
+    ///
+    /// For split nodes the children's root indices must form a contiguous
+    /// run in `nodes` so that consumers can address them via
+    /// children_start/children_len.  When they happen to already be
+    /// consecutive (the common case for all-leaf children), no extra
+    /// work is done.  When they are not consecutive (nested splits),
+    /// shallow copies of the child roots are appended as a contiguous block
+    /// before the parent node.  Nested splits are shallow (≤5 levels in
+    /// real tmux layouts) so the small duplication is acceptable.
+    fn flattenLayout(
+        a: Allocator,
+        nodes: *std.ArrayListUnmanaged(apprt.surface.TmuxEvent.Node),
+        layout: *const terminal.tmux.Layout,
+    ) !usize {
+        var node: apprt.surface.TmuxEvent.Node = .{
+            .kind = undefined,
+            .pane_id = 0,
+            .x = layout.x,
+            .y = layout.y,
+            .width = layout.width,
+            .height = layout.height,
+            .children_start = 0,
+            .children_len = 0,
+        };
+        switch (layout.content) {
+            .pane => |id| {
+                node.kind = .pane;
+                node.pane_id = id;
+                try nodes.append(a, node);
+            },
+            inline .horizontal, .vertical => |children, tag| {
+                node.kind = switch (tag) {
+                    .horizontal => .horizontal,
+                    .vertical => .vertical,
+                    else => unreachable,
+                };
+                // Flatten each child's subtree first, collecting root indices.
+                var child_roots: std.ArrayListUnmanaged(usize) = .empty;
+                defer child_roots.deinit(a);
+                for (children) |*c| {
+                    try child_roots.append(a, try flattenLayout(a, nodes, c));
+                }
+                // Check if child roots are already a contiguous run.
+                const roots = child_roots.items;
+                const already_contiguous = already: {
+                    if (roots.len == 0) break :already true;
+                    for (roots[1..], 0..) |r, i| {
+                        if (r != roots[0] + i + 1) break :already false;
+                    }
+                    break :already true;
+                };
+                if (already_contiguous and roots.len > 0) {
+                    node.children_start = roots[0];
+                    node.children_len = roots.len;
+                } else {
+                    // Append shallow copies of each child root as a
+                    // contiguous block so consumers can index them linearly.
+                    node.children_start = nodes.items.len;
+                    node.children_len = roots.len;
+                    for (roots) |idx| {
+                        try nodes.append(a, nodes.items[idx]);
+                    }
+                }
+                try nodes.append(a, node);
+            },
+        }
+        return nodes.items.len - 1;
     }
 
     pub fn apcEnd(self: *StreamHandler) !void {
@@ -1559,3 +1712,43 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 };
+
+test "serialize tmux windows flattens layout tree" {
+    if (comptime !StreamHandler.tmux_enabled) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    const Layout = terminal.tmux.Layout;
+    const children: [2]Layout = .{
+        .{ .width = 40, .height = 24, .x = 0, .y = 0, .content = .{ .pane = 1 } },
+        .{ .width = 39, .height = 24, .x = 41, .y = 0, .content = .{ .pane = 2 } },
+    };
+    const windows: [1]terminal.tmux.Viewer.Window = .{.{
+        .id = 7,
+        .name = "main",
+        .width = 80,
+        .height = 24,
+        .layout_arena = .{},
+        .layout = .{
+            .width = 80,
+            .height = 24,
+            .x = 0,
+            .y = 0,
+            .content = .{ .horizontal = &children },
+        },
+    }};
+
+    const ev = try StreamHandler.serializeTmuxWindowsAlloc(alloc, &windows);
+    defer ev.deinit();
+
+    const w = ev.event.windows;
+    try std.testing.expectEqual(@as(usize, 1), w.windows.len);
+    try std.testing.expectEqualStrings("main", w.windows[0].name);
+    // 根节点 + 两个子节点
+    try std.testing.expectEqual(@as(usize, 3), w.nodes.len);
+    const root = w.nodes[w.windows[0].root];
+    try std.testing.expect(root.kind == .horizontal);
+    try std.testing.expectEqual(@as(usize, 2), root.children_len);
+    const c0 = w.nodes[root.children_start];
+    try std.testing.expect(c0.kind == .pane);
+    try std.testing.expectEqual(@as(usize, 1), c0.pane_id);
+}
