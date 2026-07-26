@@ -418,9 +418,19 @@ pub const Surface = struct {
     cursor_pos: apprt.CursorPos,
     inspector: ?*Inspector = null,
 
+    /// Tmux pane options, set during init. router null means normal surface.
+    tmux_pane_opts: struct { router: ?*anyopaque, pane_id: usize } = .{ .router = null, .pane_id = 0 },
+
     /// The current title of the surface. The embedded apprt saves this so
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
+
+    /// Returns the tmux pane identity for this surface, or null if it is
+    /// not a tmux pane surface.
+    pub fn tmuxPane(self: *const Surface) ?apprt.surface.TmuxPane {
+        const router = self.tmux_pane_opts.router orelse return null;
+        return .{ .router = router, .pane_id = self.tmux_pane_opts.pane_id };
+    }
 
     /// Surface initialization options.
     pub const Options = extern struct {
@@ -463,6 +473,12 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Opaque TmuxRouter pointer from the tmux attach action. When
+        /// non-null this surface is a tmux pane surface for tmux_pane_id
+        /// and no subprocess is started.
+        tmux_router: ?*anyopaque = null,
+        tmux_pane_id: usize = 0,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -477,6 +493,10 @@ pub const Surface = struct {
             },
             .size = .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
+            .tmux_pane_opts = .{
+                .router = opts.tmux_router,
+                .pane_id = opts.tmux_pane_id,
+            },
         };
 
         // Add ourselves to the list of surfaces on the app.
