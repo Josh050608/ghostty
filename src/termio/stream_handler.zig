@@ -451,6 +451,22 @@ pub const StreamHandler = struct {
                         .windows => {
                             // TODO
                         },
+
+                        // Bridge handling until the router wiring lands:
+                        // pane output has nowhere to go yet, taken terminals
+                        // must be freed so they don't leak, and dead panes
+                        // are only informational.
+                        .pane_output => {},
+
+                        .pane_take => |take| {
+                            take.terminal.deinit(self.alloc);
+                            self.alloc.destroy(take.terminal);
+                        },
+
+                        .pane_gone => |id| log.info(
+                            "tmux pane gone id={}",
+                            .{id},
+                        ),
                     }
                 }
             },
