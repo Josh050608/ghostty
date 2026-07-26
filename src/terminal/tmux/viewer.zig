@@ -246,6 +246,7 @@ pub const Viewer = struct {
 
     pub const Window = struct {
         id: usize,
+        name: []const u8,
         width: usize,
         height: usize,
         layout_arena: ArenaAllocator.State,
@@ -519,8 +520,14 @@ pub const Viewer = struct {
             // care.
             .sessions_changed => {},
 
-            // We don't use window names for anything, currently.
-            .window_renamed => {},
+            .window_renamed => |info| self.windowRenamed(
+                &actions,
+                info.id,
+                info.name,
+            ) catch {
+                log.warn("failed to handle window rename, becoming defunct", .{});
+                return self.defunct();
+            },
 
             // This is for other clients, which we don't do anything about.
             // For us, we'll get `exit` or `session_changed`, respectively.
@@ -622,6 +629,35 @@ pub const Viewer = struct {
 
         // Queue list-windows to get the updated window list
         try self.queueCommands(&.{.list_windows});
+    }
+
+    /// A window was renamed. Update our state and notify the caller
+    /// via a windows action.
+    fn windowRenamed(
+        self: *Viewer,
+        actions: *std.ArrayList(Action),
+        window_id: usize,
+        name: []const u8,
+    ) !void {
+        const window: *Window = for (self.windows.items) |*w| {
+            if (w.id == window_id) break w;
+        } else {
+            log.info("rename for unknown window id={}", .{window_id});
+            return;
+        };
+
+        // Dupe into the window's arena. Repeated renames leak within
+        // the arena until the window is replaced; names are tiny so
+        // this is acceptable.
+        {
+            var arena = window.layout_arena.promote(self.alloc);
+            defer window.layout_arena = arena.state;
+            window.name = try arena.allocator().dupe(u8, name);
+        }
+
+        var arena = self.action_arena.promote(self.alloc);
+        defer self.action_arena = arena.state;
+        try actions.append(arena.allocator(), .{ .windows = self.windows.items });
     }
 
     fn syncLayouts(
@@ -865,7 +901,7 @@ pub const Viewer = struct {
         while (it.next()) |line_raw| {
             const line = std.mem.trim(u8, line_raw, " \t\r");
             if (line.len == 0) continue;
-            const data = output.parseFormatStruct(
+            const data = output.parseFormatStructRest(
                 Format.list_windows.Struct(),
                 line,
                 Format.list_windows.delim,
@@ -891,6 +927,7 @@ pub const Viewer = struct {
 
             try windows.append(self.alloc, .{
                 .id = data.window_id,
+                .name = try window_alloc.dupe(u8, data.window_name),
                 .width = data.window_width,
                 .height = data.window_height,
                 .layout_arena = arena.state,
@@ -1406,6 +1443,7 @@ const Format = struct {
             .window_width,
             .window_height,
             .window_layout,
+            .window_name,
         },
     };
 
@@ -1543,7 +1581,7 @@ test "session changed resets state" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$1 @0 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1]
+                \\$1 @0 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1] main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -1590,7 +1628,7 @@ test "session changed resets state" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$2 @1 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1]
+                \\$2 @1 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1] main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -1642,7 +1680,7 @@ test "initial flow" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1]
+                \\$0 @0 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1] main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -1815,7 +1853,7 @@ test "layout change" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -1886,7 +1924,7 @@ test "layout_change does not return command when queue not empty" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -1947,7 +1985,7 @@ test "layout_change returns command when queue was empty" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -2014,7 +2052,7 @@ test "window_add queues list_windows when queue empty" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -2075,7 +2113,7 @@ test "window_add queues list_windows when queue not empty" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -2137,7 +2175,7 @@ test "two pane flow with pane state" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4]
+                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4] bash
                 ,
             } },
             .contains_tags = &.{ .windows, .command },
@@ -2285,6 +2323,47 @@ test "two pane flow with pane state" {
         .{
             .input = .{ .tmux = .exit },
             .contains_tags = &.{.exit},
+        },
+    });
+}
+
+test "window name parsed and renamed" {
+    const alloc = testing.allocator;
+    var v: Viewer = try .init(testing.io, alloc);
+    defer v.deinit();
+
+    try testViewer(&v, &.{
+        // startup: initial block + session-changed
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "test" } } },
+            .contains_command = "display-message",
+        },
+        // tmux version response
+        .{ .input = .{ .tmux = .{ .block_end = "3.5a" } }, .contains_command = "list-windows" },
+        // list-windows response: window_name is last, may contain spaces
+        .{
+            .input = .{ .tmux = .{
+                .block_end = "$0 @1 80 24 b25d,80x24,0,0,0 my editor\n",
+            } },
+            .contains_tags = &.{.windows},
+            .check = (struct {
+                fn check(viewer: *Viewer, actions: []const Viewer.Action) !void {
+                    _ = actions;
+                    try testing.expectEqualStrings("my editor", viewer.windows.items[0].name);
+                }
+            }).check,
+        },
+        // %window-renamed updates the name and emits a windows action
+        .{
+            .input = .{ .tmux = .{ .window_renamed = .{ .id = 1, .name = "vim" } } },
+            .contains_tags = &.{.windows},
+            .check = (struct {
+                fn check(viewer: *Viewer, actions: []const Viewer.Action) !void {
+                    _ = actions;
+                    try testing.expectEqualStrings("vim", viewer.windows.items[0].name);
+                }
+            }).check,
         },
     });
 }
