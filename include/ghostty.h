@@ -782,6 +782,66 @@ typedef struct {
   ghostty_action_key_table_u value;
 } ghostty_action_key_table_s;
 
+// apprt.action.Tmux.Tag
+typedef enum {
+  GHOSTTY_TMUX_ATTACH,
+  GHOSTTY_TMUX_WINDOWS,
+  GHOSTTY_TMUX_EXIT,
+} ghostty_action_tmux_tag_e;
+
+// apprt.action.Tmux.Attach
+typedef struct {
+  void* router;
+} ghostty_action_tmux_attach_s;
+
+// apprt.action.Tmux.Node.Kind
+typedef enum {
+  GHOSTTY_ACTION_TMUX_NODE_KIND_PANE,
+  GHOSTTY_ACTION_TMUX_NODE_KIND_HORIZONTAL,
+  GHOSTTY_ACTION_TMUX_NODE_KIND_VERTICAL,
+} ghostty_action_tmux_node_kind_e;
+
+// apprt.action.Tmux.Node
+typedef struct {
+  ghostty_action_tmux_node_kind_e kind;
+  uintptr_t pane_id;
+  uintptr_t x;
+  uintptr_t y;
+  uintptr_t width;
+  uintptr_t height;
+  uintptr_t children_start;
+  uintptr_t children_len;
+} ghostty_action_tmux_node_s;
+
+// apprt.action.Tmux.CWindow
+typedef struct {
+  uintptr_t id;
+  const char* name;
+  uintptr_t width;
+  uintptr_t height;
+  uintptr_t root;
+} ghostty_action_tmux_window_s;
+
+// apprt.action.Tmux.Windows.C
+typedef struct {
+  const ghostty_action_tmux_window_s* windows;
+  uintptr_t windows_len;
+  const ghostty_action_tmux_node_s* nodes;
+  uintptr_t nodes_len;
+} ghostty_action_tmux_windows_s;
+
+// apprt.action.Tmux.CValue
+typedef union {
+  ghostty_action_tmux_attach_s attach;
+  ghostty_action_tmux_windows_s windows;
+} ghostty_action_tmux_u;
+
+// apprt.action.Tmux.C
+typedef struct {
+  ghostty_action_tmux_tag_e tag;
+  ghostty_action_tmux_u value;
+} ghostty_action_tmux_s;
+
 // apprt.action.ColorKind
 typedef enum {
   GHOSTTY_ACTION_COLOR_KIND_FOREGROUND = -1,
@@ -949,6 +1009,7 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
+  GHOSTTY_ACTION_TMUX,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -990,6 +1051,7 @@ typedef union {
   ghostty_action_search_total_s search_total;
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
+  ghostty_action_tmux_s tmux;
 } ghostty_action_u;
 
 typedef struct {
