@@ -454,6 +454,7 @@ fn wakeupCallback(
     const cb = cb_ orelse return .rearm;
     cb.self.drainMailbox(cb) catch |err|
         log.err("error draining mailbox err={}", .{err});
+    cb.io.tmuxDrainRouter();
 
     return .rearm;
 }
