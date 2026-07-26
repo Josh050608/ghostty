@@ -11,28 +11,33 @@ const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const WRITE_REQ_PREALLOC = std.math.pow(usize, 2, 5);
 
 /// The kinds of backends.
-pub const Kind = enum { exec };
+pub const Kind = enum { exec, tmux_pane };
 
 /// Configuration for the various backend types.
 pub const Config = union(Kind) {
     /// Exec uses posix exec to run a command with a pty.
     exec: termio.Exec.Config,
+    /// TmuxPane routes input as send-keys commands through a TmuxRouter.
+    tmux_pane: termio.TmuxPane.Config,
 };
 
 /// Backend implementations. A backend is responsible for owning the pty
 /// behavior and providing read/write capabilities.
 pub const Backend = union(Kind) {
     exec: termio.Exec,
+    tmux_pane: termio.TmuxPane,
 
     pub fn deinit(self: *Backend) void {
         switch (self.*) {
             .exec => |*exec| exec.deinit(),
+            .tmux_pane => |*tp| tp.deinit(),
         }
     }
 
     pub fn initTerminal(self: *Backend, t: *terminal.Terminal) void {
         switch (self.*) {
             .exec => |*exec| exec.initTerminal(t),
+            .tmux_pane => |*tp| tp.initTerminal(t),
         }
     }
 
@@ -44,12 +49,14 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.threadEnter(alloc, io, td),
+            .tmux_pane => |*tp| try tp.threadEnter(alloc, io, td),
         }
     }
 
     pub fn threadExit(self: *Backend, td: *termio.Termio.ThreadData) void {
         switch (self.*) {
             .exec => |*exec| exec.threadExit(td),
+            .tmux_pane => |*tp| tp.threadExit(td),
         }
     }
 
@@ -60,6 +67,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.focusGained(td, focused),
+            .tmux_pane => |*tp| try tp.focusGained(td, focused),
         }
     }
 
@@ -70,6 +78,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.resize(grid_size, screen_size),
+            .tmux_pane => |*tp| try tp.resize(grid_size, screen_size),
         }
     }
 
@@ -82,6 +91,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.queueWrite(alloc, td, data, linefeed),
+            .tmux_pane => |*tp| try tp.queueWrite(alloc, td, data, linefeed),
         }
     }
 
@@ -99,6 +109,12 @@ pub const Backend = union(Kind) {
                 exit_code,
                 runtime_ms,
             ),
+            .tmux_pane => |*tp| try tp.childExitedAbnormally(
+                gpa,
+                t,
+                exit_code,
+                runtime_ms,
+            ),
         }
     }
 
@@ -108,6 +124,7 @@ pub const Backend = union(Kind) {
     pub fn getProcessInfo(self: *Backend, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
         return switch (self.*) {
             .exec => |*exec| exec.getProcessInfo(info),
+            .tmux_pane => |*tp| tp.getProcessInfo(info),
         };
     }
 };
@@ -115,10 +132,12 @@ pub const Backend = union(Kind) {
 /// Termio thread data. See termio.ThreadData for docs.
 pub const ThreadData = union(Kind) {
     exec: termio.Exec.ThreadData,
+    tmux_pane: void,
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         switch (self.*) {
             .exec => |*exec| exec.deinit(alloc),
+            .tmux_pane => {},
         }
     }
 
