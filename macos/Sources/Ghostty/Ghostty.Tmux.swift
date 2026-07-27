@@ -4,6 +4,10 @@ extension Ghostty {
     /// A tmux control mode event delivered via GHOSTTY_ACTION_TMUX.
     /// All payloads are deep copies: the C arrays are only valid during
     /// the action callback.
+    ///
+    /// @unchecked Sendable: the router pointer is an opaque token never
+    /// dereferenced in Swift — it is only passed to the thread-safe C APIs
+    /// ghostty_tmux_router_command and ghostty_tmux_router_release.
     enum TmuxEvent: @unchecked Sendable {
         case attach(router: UnsafeMutableRawPointer)
         case windows(TmuxWindows)
@@ -17,7 +21,8 @@ extension Ghostty {
         init?(from c: ghostty_action_tmux_windows_s) {
             if let cw = c.windows {
                 for i in 0..<Int(c.windows_len) {
-                    windows.append(TmuxWindow(from: cw[i]))
+                    guard let w = TmuxWindow(from: cw[i]) else { return nil }
+                    windows.append(w)
                 }
             }
             if let cn = c.nodes {
@@ -26,8 +31,9 @@ extension Ghostty {
                     nodes.append(node)
                 }
             }
-            // Window roots must be valid node indices (non-negative and within bounds).
-            for w in windows where w.root < 0 || w.root >= nodes.count { return nil }
+            // Window roots must be valid node indices. Int(exactly:) already
+            // rejects values > Int.max, so root is never negative here.
+            for w in windows where w.root >= nodes.count { return nil }
         }
     }
 
@@ -38,12 +44,13 @@ extension Ghostty {
         var height: UInt
         var root: Int
 
-        init(from c: ghostty_action_tmux_window_s) {
+        init?(from c: ghostty_action_tmux_window_s) {
+            guard let root = Int(exactly: c.root) else { return nil }
             id = UInt(c.id)
             name = String(cString: c.name)
             width = UInt(c.width)
             height = UInt(c.height)
-            root = Int(c.root)
+            self.root = root
         }
     }
 
@@ -66,13 +73,15 @@ extension Ghostty {
             case GHOSTTY_ACTION_TMUX_NODE_KIND_VERTICAL: kind = .vertical
             default: return nil
             }
+            guard let childrenStart = Int(exactly: c.children_start),
+                  let childrenLen = Int(exactly: c.children_len) else { return nil }
             paneId = UInt(c.pane_id)
             x = UInt(c.x)
             y = UInt(c.y)
             width = UInt(c.width)
             height = UInt(c.height)
-            childrenStart = Int(c.children_start)
-            childrenLen = Int(c.children_len)
+            self.childrenStart = childrenStart
+            self.childrenLen = childrenLen
         }
     }
 }

@@ -38,14 +38,16 @@ import GhosttyKit
         #expect(Ghostty.TmuxNode(from: bad) == nil)
     }
 
-    @Test func windowsRejectsNegativeRoot() throws {
+    /// UInt.max cannot be represented as Int, so TmuxWindow.init? returns nil
+    /// via Int(exactly:) rather than trapping with a checked UInt→Int cast.
+    @Test func windowsRejectsOversizedRoot() throws {
         var nodes = [ghostty_action_tmux_node_s(
             kind: GHOSTTY_ACTION_TMUX_NODE_KIND_PANE,
             pane_id: 5, x: 0, y: 0, width: 80, height: 24,
             children_start: 0, children_len: 0)]
         let name = strdup("test")!
         defer { free(name) }
-        // Use UInt.max as root, which wraps to -1 as Int
+        // root: UInt.max cannot fit in Int — must return nil, not trap.
         var windows = [ghostty_action_tmux_window_s(
             id: 1, name: name, width: 80, height: 24, root: UInt.max)]
 
@@ -57,5 +59,15 @@ import GhosttyKit
             }
         }
         #expect(copied == nil)
+    }
+
+    /// UInt.max cannot be represented as Int, so TmuxNode.init? returns nil
+    /// via Int(exactly:) rather than trapping with a checked UInt→Int cast.
+    @Test func nodeRejectsOversizedChildrenStart() {
+        let bad = ghostty_action_tmux_node_s(
+            kind: GHOSTTY_ACTION_TMUX_NODE_KIND_PANE,
+            pane_id: 0, x: 0, y: 0, width: 0, height: 0,
+            children_start: UInt.max, children_len: 0)
+        #expect(Ghostty.TmuxNode(from: bad) == nil)
     }
 }
