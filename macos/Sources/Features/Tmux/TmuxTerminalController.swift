@@ -160,6 +160,27 @@ class TmuxTerminalController: TerminalController {
         }
     }
 
+    // MARK: - Menu validation
+
+    /// Disable "Close Other Tabs" and "Close Tabs on the Right" for live tmux
+    /// sessions. Both actions reach `closeTabImmediately` → `window.close()` on
+    /// OTHER tmux tab windows, locally closing them with no tmux command, which
+    /// violates the tmux-authoritative invariant. Mapping them to batched
+    /// kill-window is deferred; disabled here to preserve correct state.
+    /// When torn down or force-closing we defer to super (normal close path).
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard !forceClosing, let session, !session.isTearingDown else {
+            return super.validateMenuItem(item)
+        }
+        switch item.action {
+        case #selector(closeOtherTabs(_:)),
+             #selector(closeTabsOnTheRight(_:)):
+            return false
+        default:
+            return super.validateMenuItem(item)
+        }
+    }
+
     // MARK: - Focus → select-pane
 
     /// Override syncFocusToSurfaceTree (called from focusedSurface.didSet in Base)
