@@ -1083,12 +1083,15 @@ pub const Viewer = struct {
             });
         }
 
+        // Sync layouts FIRST so self.windows holds the new window set.
+        // The action must reference viewer-owned memory: the caller
+        // consumes actions after we return, and the stack-local list
+        // is freed by our defer. (Fixes a use-after-free.)
+        try self.syncLayouts(windows.items);
+
         // Setup our windows action so the caller can process GUI
         // window changes.
-        try actions.append(arena_alloc, .{ .windows = windows.items });
-
-        // Sync up our layouts. This will populate unknown panes, prune, etc.
-        try self.syncLayouts(windows.items);
+        try actions.append(arena_alloc, .{ .windows = self.windows.items });
     }
 
     fn receivedPaneState(
@@ -2694,8 +2697,17 @@ test "window name parsed and renamed" {
             .contains_tags = &.{.windows},
             .check = (struct {
                 fn check(viewer: *Viewer, actions: []const Viewer.Action) !void {
-                    _ = actions;
+                    // Verify viewer state
                     try testing.expectEqualStrings("my editor", viewer.windows.items[0].name);
+                    // Verify the action payload references stable viewer-owned memory
+                    // (not the freed stack-local list). Under the old code this would
+                    // read freed memory and return garbage len or crash.
+                    for (actions) |a| if (a == .windows) {
+                        try testing.expectEqual(@as(usize, 1), a.windows.len);
+                        try testing.expectEqualStrings("my editor", a.windows[0].name);
+                        return;
+                    };
+                    return error.MissingWindowsAction;
                 }
             }).check,
         },
