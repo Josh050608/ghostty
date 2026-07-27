@@ -991,7 +991,11 @@ pub const Viewer = struct {
                 content,
             ),
 
-            .tmux_version => try self.receivedTmuxVersion(content),
+            .tmux_version => try self.receivedTmuxVersion(
+                arena_alloc,
+                actions,
+                content,
+            ),
         }
 
         // A command completing may unblock pending takes.
@@ -1015,6 +1019,8 @@ pub const Viewer = struct {
 
     fn receivedTmuxVersion(
         self: *Viewer,
+        arena_alloc: Allocator,
+        actions: *std.ArrayList(Action),
         content: []const u8,
     ) !void {
         const line = std.mem.trim(u8, content, " \t\r\n");
@@ -1033,6 +1039,51 @@ pub const Viewer = struct {
             self.alloc.free(self.tmux_version);
         }
         self.tmux_version = try self.alloc.dupe(u8, data.version);
+
+        // Enforce the minimum supported tmux version (3.2): older
+        // servers lack control mode capabilities we depend on, and a
+        // half-working session is worse than a clean refusal. An
+        // unparseable version (distro forks, "next-X.Y" builds) is
+        // allowed through optimistically.
+        if (parseVersion(self.tmux_version)) |ver| {
+            if (ver.major < 3 or (ver.major == 3 and ver.minor < 2)) {
+                log.warn(
+                    "tmux version {s} below minimum 3.2, detaching",
+                    .{self.tmux_version},
+                );
+                // Emit detach-client command then exit. We go defunct so
+                // the caller (nextCommand) will not attempt to dequeue and
+                // send the next command in the queue.
+                const detach_cmd = try arena_alloc.dupe(u8, "detach-client\n");
+                try actions.ensureUnusedCapacity(arena_alloc, 2);
+                actions.appendAssumeCapacity(.{ .command = detach_cmd });
+                actions.appendAssumeCapacity(.exit);
+                self.state = .defunct;
+                return;
+            }
+        } else log.info(
+            "unparseable tmux version {s}, assuming capable",
+            .{self.tmux_version},
+        );
+    }
+
+    /// Parse "3.5a"/"3.2"/"next-3.6" style versions: the first digit run
+    /// is the major, an immediately following ".digits" the minor.
+    fn parseVersion(s: []const u8) ?struct { major: usize, minor: usize } {
+        var i: usize = 0;
+        while (i < s.len and !std.ascii.isDigit(s[i])) i += 1;
+        if (i == s.len) return null;
+        var major: usize = 0;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1)
+            major = major * 10 + (s[i] - '0');
+        var minor: usize = 0;
+        if (i < s.len and s[i] == '.') {
+            i += 1;
+            if (i == s.len or !std.ascii.isDigit(s[i])) return null;
+            while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1)
+                minor = minor * 10 + (s[i] - '0');
+        }
+        return .{ .major = major, .minor = minor };
     }
 
     fn receivedListWindows(
@@ -2826,4 +2877,117 @@ test "send_command before ready is dropped" {
     // startup_block state: directly send without crash, no action
     const actions = viewer.next(.{ .send_command = "kill-window -t @1\n" });
     try testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+test "tmux version below minimum detaches" {
+    const alloc = testing.allocator;
+    var v: Viewer = try .init(testing.io, alloc);
+    defer v.deinit();
+
+    try testViewer(&v, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "test" } } },
+            .contains_command = "display-message",
+        },
+        // Version response 3.1: expect detach-client command + exit, not list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.1" } },
+            .contains_command = "detach-client",
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(_: *Viewer, actions: []const Viewer.Action) anyerror!void {
+                    // Must NOT contain list-windows command
+                    for (actions) |action| {
+                        if (action == .command) {
+                            try testing.expect(!std.mem.startsWith(
+                                u8,
+                                action.command,
+                                "list-windows",
+                            ));
+                        }
+                    }
+                }
+            }).check,
+        },
+    });
+}
+
+test "tmux version at minimum proceeds" {
+    const alloc = testing.allocator;
+    var v: Viewer = try .init(testing.io, alloc);
+    defer v.deinit();
+
+    try testViewer(&v, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "test" } } },
+            .contains_command = "display-message",
+        },
+        // Version response 3.2: at minimum, proceed with list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.2" } },
+            .contains_command = "list-windows",
+        },
+    });
+}
+
+test "tmux version unparseable proceeds" {
+    const alloc = testing.allocator;
+    var v: Viewer = try .init(testing.io, alloc);
+    defer v.deinit();
+
+    try testViewer(&v, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "test" } } },
+            .contains_command = "display-message",
+        },
+        // Unparseable version: optimistically proceed with list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "weird-fork" } },
+            .contains_command = "list-windows",
+        },
+    });
+}
+
+test "parseVersion" {
+    const parseVersion = Viewer.parseVersion;
+
+    // Standard versions
+    const v35a = parseVersion("3.5a").?;
+    try testing.expectEqual(@as(usize, 3), v35a.major);
+    try testing.expectEqual(@as(usize, 5), v35a.minor);
+
+    const v32 = parseVersion("3.2").?;
+    try testing.expectEqual(@as(usize, 3), v32.major);
+    try testing.expectEqual(@as(usize, 2), v32.minor);
+
+    const v31 = parseVersion("3.1").?;
+    try testing.expectEqual(@as(usize, 3), v31.major);
+    try testing.expectEqual(@as(usize, 1), v31.minor);
+
+    // next-X.Y style (distro fork builds)
+    const vnext = parseVersion("next-3.6").?;
+    try testing.expectEqual(@as(usize, 3), vnext.major);
+    try testing.expectEqual(@as(usize, 6), vnext.minor);
+
+    // Version with suffix letter (already covered by v35a, verifying minor)
+    const v35 = parseVersion("3.5a").?;
+    try testing.expectEqual(@as(usize, 3), v35.major);
+    try testing.expectEqual(@as(usize, 5), v35.minor);
+
+    // Empty string -> null
+    try testing.expect(parseVersion("") == null);
+
+    // No digits -> null
+    try testing.expect(parseVersion("abc") == null);
+
+    // Major only (no dot) -> minor = 0
+    const v3 = parseVersion("3").?;
+    try testing.expectEqual(@as(usize, 3), v3.major);
+    try testing.expectEqual(@as(usize, 0), v3.minor);
+
+    // Dot but no minor digits -> null
+    try testing.expect(parseVersion("3.") == null);
 }
