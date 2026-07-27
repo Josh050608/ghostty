@@ -942,6 +942,31 @@ pub const Tmux = union(enum) {
     }
 };
 
+/// A typed tmux command the GUI sends to a session's TmuxRouter via
+/// ghostty_tmux_router_command. Command strings are rendered Zig-side
+/// (TmuxRouter.formatCommand) so the C ABI stays typed.
+pub const TmuxCommand = extern struct {
+    tag: Tag,
+    /// Pane id for kill_pane/select_pane; window id for kill_window.
+    id: usize = 0,
+    /// Client grid size for resize.
+    width: usize = 0,
+    height: usize = 0,
+
+    pub const Tag = enum(c_int) {
+        kill_pane,
+        kill_window,
+        detach,
+        select_pane,
+        resize,
+
+        // Sync with: ghostty_tmux_command_tag_e
+        test "ghostty.h TmuxCommand.Tag" {
+            try lib.checkGhosttyHEnum(Tag, "GHOSTTY_TMUX_COMMAND_");
+        }
+    };
+};
+
 pub const ColorChange = extern struct {
     kind: ColorKind,
     r: u8,

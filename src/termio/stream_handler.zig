@@ -427,6 +427,12 @@ pub const StreamHandler = struct {
                             router,
                         );
 
+                        // One extra reference owned by the GUI, released
+                        // via ghostty_tmux_router_release when it is done
+                        // with the session (or by App.zig if the attach
+                        // event is dropped before delivery).
+                        router.ref();
+
                         self.tmux_viewer = viewer;
                         self.tmux_router = router;
                         self.surfaceMessageWriter(.{ .tmux = ev });
@@ -629,6 +635,7 @@ pub const StreamHandler = struct {
             self.tmux_viewer = null;
         }
         if (self.tmux_router) |router| {
+            router.close();
             router.unref();
             self.tmux_router = null;
         }

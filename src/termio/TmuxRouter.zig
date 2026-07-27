@@ -43,6 +43,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const global = @import("../global.zig");
 const xev = global.xev;
+const apprt = @import("../apprt.zig");
 const termio = @import("../termio.zig");
 const terminalpkg = @import("../terminal/main.zig");
 
@@ -57,6 +58,9 @@ events_mutex: std.Io.Mutex = .init,
 panes_mutex: std.Io.Mutex = .init,
 alloc: Allocator,
 refs: std.atomic.Value(usize),
+/// Set by close() when the tmux session ends. sendCommand/register/unregister
+/// become silent no-ops after this is true.
+closed: std.atomic.Value(bool) = .init(false),
 wakeup: xev.Async,
 panes: std.AutoHashMapUnmanaged(usize, *termio.Termio) = .empty,
 events: std.ArrayListUnmanaged(Event) = .empty,
@@ -89,11 +93,36 @@ pub fn unref(self: *TmuxRouter) void {
     alloc.destroy(self);
 }
 
+/// Mark the router closed: the host surface's tmux session ended.
+/// Subsequent sendCommand/register/unregister become silent no-ops so
+/// late calls from the GUI or dying pane surfaces are harmless. The
+/// panes map is NOT cleared here; pane surfaces still unregister
+/// (no-op) and drop their refs normally.
+pub fn close(self: *TmuxRouter) void {
+    self.closed.store(true, .release);
+}
+
+/// Render a typed TmuxCommand into `buf` as a tmux control-mode string.
+/// Returns the written slice. Pure function; no router state accessed.
+pub fn formatCommand(
+    buf: []u8,
+    cmd: apprt.action.TmuxCommand,
+) std.fmt.BufPrintError![]u8 {
+    return switch (cmd.tag) {
+        .kill_pane => std.fmt.bufPrint(buf, "kill-pane -t %{d}\n", .{cmd.id}),
+        .kill_window => std.fmt.bufPrint(buf, "kill-window -t @{d}\n", .{cmd.id}),
+        .detach => std.fmt.bufPrint(buf, "detach-client\n", .{}),
+        .select_pane => std.fmt.bufPrint(buf, "select-pane -t %{d}\n", .{cmd.id}),
+        .resize => std.fmt.bufPrint(buf, "refresh-client -C {d}x{d}\n", .{ cmd.width, cmd.height }),
+    };
+}
+
 pub fn register(
     self: *TmuxRouter,
     pane_id: usize,
     io: *termio.Termio,
 ) Allocator.Error!void {
+    if (self.closed.load(.acquire)) return;
     // Map op under panes_mutex (never nested with events_mutex).
     {
         self.panes_mutex.lockUncancelable(global.io());
@@ -112,6 +141,7 @@ pub fn register(
 }
 
 pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
+    if (self.closed.load(.acquire)) return;
     // Reserve the event slot first so the append below cannot fail:
     // the pane removal is mandatory (its Termio is being torn down),
     // and losing the event would leave the viewer routing to a ghost.
@@ -140,6 +170,7 @@ pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
 }
 
 pub fn sendCommand(self: *TmuxRouter, cmd: []const u8) Allocator.Error!void {
+    if (self.closed.load(.acquire)) return;
     {
         self.events_mutex.lockUncancelable(global.io());
         defer self.events_mutex.unlock(global.io());
@@ -243,4 +274,44 @@ test "unregister always emits the unregistered event" {
     try std.testing.expectEqual(@as(usize, 2), events.items.len);
     try std.testing.expect(events.items[0] == .registered);
     try std.testing.expect(events.items[1] == .unregistered);
+}
+
+test "closed router drops commands silently" {
+    const alloc = std.testing.allocator;
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+    const router = try TmuxRouter.create(alloc, wakeup);
+    defer router.unref();
+
+    router.close();
+    try router.sendCommand("list-windows\n"); // 不得报错、不得入队
+
+    var events: std.ArrayListUnmanaged(Event) = .empty;
+    defer events.deinit(alloc);
+    try router.drainEvents(&events, alloc);
+    try std.testing.expectEqual(@as(usize, 0), events.items.len);
+}
+
+test "formatCommand renders each tag" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "kill-pane -t %7\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .kill_pane, .id = 7 }),
+    );
+    try std.testing.expectEqualStrings(
+        "kill-window -t @3\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .kill_window, .id = 3 }),
+    );
+    try std.testing.expectEqualStrings(
+        "detach-client\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .detach }),
+    );
+    try std.testing.expectEqualStrings(
+        "select-pane -t %2\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .select_pane, .id = 2 }),
+    );
+    try std.testing.expectEqualStrings(
+        "refresh-client -C 120x40\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .resize, .width = 120, .height = 40 }),
+    );
 }

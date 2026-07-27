@@ -844,6 +844,23 @@ typedef struct {
   ghostty_action_tmux_u value;
 } ghostty_action_tmux_s;
 
+// apprt.action.TmuxCommand.Tag
+typedef enum {
+  GHOSTTY_TMUX_COMMAND_KILL_PANE,
+  GHOSTTY_TMUX_COMMAND_KILL_WINDOW,
+  GHOSTTY_TMUX_COMMAND_DETACH,
+  GHOSTTY_TMUX_COMMAND_SELECT_PANE,
+  GHOSTTY_TMUX_COMMAND_RESIZE,
+} ghostty_tmux_command_tag_e;
+
+// apprt.action.TmuxCommand
+typedef struct {
+  ghostty_tmux_command_tag_e tag;
+  uintptr_t id;
+  uintptr_t width;
+  uintptr_t height;
+} ghostty_tmux_command_s;
+
 // apprt.action.ColorKind
 typedef enum {
   GHOSTTY_ACTION_COLOR_KIND_FOREGROUND = -1,
@@ -1180,6 +1197,8 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+GHOSTTY_API void ghostty_tmux_router_command(void*, ghostty_tmux_command_s);
+GHOSTTY_API void ghostty_tmux_router_release(void*);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

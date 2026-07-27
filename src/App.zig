@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const assert = @import("quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const apprt = @import("apprt.zig");
+const termio = @import("termio.zig");
 const Surface = @import("Surface.zig");
 const input = @import("input.zig");
 const configpkg = @import("config.zig");
@@ -499,7 +500,18 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
     // Free any heap-owning message variants so we don't leak their memory.
     // tmux events own an ArenaAllocator; receiver must call deinit().
     switch (msg) {
-        .tmux => |ev| ev.deinit(),
+        .tmux => |ev| {
+            // The attach event carries a router reference owned by
+            // the GUI; if the event never reaches it, release here.
+            switch (ev.event) {
+                .attach => |v| {
+                    const router: *termio.TmuxRouter = @ptrCast(@alignCast(v.router));
+                    router.unref();
+                },
+                else => {},
+            }
+            ev.deinit();
+        },
         else => {},
     }
 }

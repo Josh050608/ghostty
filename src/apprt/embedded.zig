@@ -16,6 +16,7 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
+const termio = @import("../termio.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
@@ -2096,6 +2097,32 @@ pub const CAPI = struct {
     }
 
     /// Sets the window background blur on macOS to the desired value.
+    /// Send a typed tmux command to a session's router. The router pointer
+    /// is the one delivered by the tmux attach action; the GUI must still
+    /// hold its reference (see ghostty_tmux_router_release). Safe to call
+    /// after the session ended: a closed router drops commands silently.
+    export fn ghostty_tmux_router_command(
+        router_ptr: *anyopaque,
+        cmd: apprt.action.TmuxCommand,
+    ) void {
+        const router: *termio.TmuxRouter = @ptrCast(@alignCast(router_ptr));
+        var buf: [128]u8 = undefined;
+        const str = termio.TmuxRouter.formatCommand(&buf, cmd) catch |err| {
+            log.warn("tmux command format failed err={}", .{err});
+            return;
+        };
+        router.sendCommand(str) catch |err| {
+            log.warn("tmux command dropped err={}", .{err});
+        };
+    }
+
+    /// Release the GUI's reference on a tmux router (taken on its behalf
+    /// when the attach action was emitted). Call exactly once per attach.
+    export fn ghostty_tmux_router_release(router_ptr: *anyopaque) void {
+        const router: *termio.TmuxRouter = @ptrCast(@alignCast(router_ptr));
+        router.unref();
+    }
+
     /// I do this in Zig as an extern function because I don't know how to
     /// call these functions in Swift.
     ///
