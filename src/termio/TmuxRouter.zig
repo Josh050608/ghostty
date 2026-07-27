@@ -26,6 +26,9 @@
 //!   panes_mutex, release, then event append under events_mutex, release,
 //!   then notify) — they are never nested.  Both are called from
 //!   threadEnter/threadExit, which never hold a renderer mutex.
+//!   unregister uses events → panes → events segment pattern to pre-reserve
+//!   the event slot before pane removal, ensuring the unregistered event
+//!   cannot be lost due to OOM after the pane is already deleted.
 //!
 //!   unref teardown takes neither lock: refcount == 0 guarantees
 //!   exclusivity.
@@ -105,19 +108,27 @@ pub fn register(
 }
 
 pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
-    // Map op under panes_mutex (never nested with events_mutex).
+    // Reserve the event slot first so the append below cannot fail:
+    // the pane removal is mandatory (its Termio is being torn down),
+    // and losing the event would leave the viewer routing to a ghost.
+    var reserved = true;
+    {
+        self.events_mutex.lockUncancelable(global.io());
+        defer self.events_mutex.unlock(global.io());
+        self.events.ensureUnusedCapacity(self.alloc, 1) catch {
+            reserved = false;
+            log.warn("tmux router unregister event dropped (OOM) pane={}", .{pane_id});
+        };
+    }
     {
         self.panes_mutex.lockUncancelable(global.io());
         defer self.panes_mutex.unlock(global.io());
         _ = self.panes.remove(pane_id);
     }
-    // Event append under events_mutex (never nested with panes_mutex).
-    {
+    if (reserved) {
         self.events_mutex.lockUncancelable(global.io());
         defer self.events_mutex.unlock(global.io());
-        self.events.append(self.alloc, .{ .unregistered = pane_id }) catch |err| {
-            log.warn("tmux router event dropped err={}", .{err});
-        };
+        self.events.appendAssumeCapacity(.{ .unregistered = pane_id });
     }
     self.wakeup.notify() catch {};
 }
@@ -207,4 +218,23 @@ test "router refcount" {
     router.ref();
     router.unref();
     router.unref(); // drops to zero and self-destroys; no leak or double-free
+}
+
+test "unregister always emits the unregistered event" {
+    const alloc = std.testing.allocator;
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+    const router = try TmuxRouter.create(alloc, wakeup);
+    defer router.unref();
+
+    var io: termio.Termio = undefined; // 仅作指针占位,不解引用
+    try router.register(7, &io);
+    router.unregister(7);
+
+    var events: std.ArrayListUnmanaged(Event) = .empty;
+    defer events.deinit(alloc);
+    try router.drainEvents(&events, alloc);
+    try std.testing.expectEqual(@as(usize, 2), events.items.len);
+    try std.testing.expect(events.items[0] == .registered);
+    try std.testing.expect(events.items[1] == .unregistered);
 }

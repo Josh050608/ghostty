@@ -1000,9 +1000,13 @@ pub const Viewer = struct {
             const pane: *Pane = kv.value_ptr;
             switch (pane.state) {
                 .loading => |l| if (l.take_pending and !self.paneBusy(kv.key_ptr.*)) {
+                    // Reserve first: after takePane the terminal is on
+                    // the heap and the pane is .attached; a failed
+                    // append would orphan it.
+                    try actions.ensureUnusedCapacity(arena_alloc, 1);
                     const taken = self.takePane(kv.key_ptr.*) orelse
                         return error.OutOfMemory;
-                    try actions.appendSlice(arena_alloc, taken);
+                    actions.appendSliceAssumeCapacity(taken);
                 },
                 else => {},
             }
