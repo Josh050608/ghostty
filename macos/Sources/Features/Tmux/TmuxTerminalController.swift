@@ -44,6 +44,9 @@ class TmuxTerminalController: TerminalController {
             keepFocus = newTree.root?.leftmostLeaf()
         }
 
+        // tmux is authoritative; layout rebuilds must not enter the undo stack.
+        undoManager?.disableUndoRegistration()
+        defer { undoManager?.enableUndoRegistration() }
         replaceSurfaceTree(
             newTree,
             moveFocusTo: keepFocus,
@@ -72,6 +75,10 @@ class TmuxTerminalController: TerminalController {
     override func syncFocusToSurfaceTree() {
         super.syncFocusToSurfaceTree()
 
+        // Only send select-pane when the window actually gained key status;
+        // skip when this hook fires because the window just resigned key.
+        guard window?.isKeyWindow == true else { return }
+
         guard !forceClosing,
               let session, !session.isTearingDown,
               let view = focusedSurface,
@@ -95,6 +102,8 @@ class TmuxTerminalController: TerminalController {
     /// guarantees inequality against any valid layout signature and forces
     /// a rebuild when the mapping is stale.
     private func treeSignature(_ t: SplitTree<Ghostty.SurfaceView>) -> String {
+        // Empty tree returns "" which never matches a layout signature, so a
+        // rebuild is always forced — the safe direction.
         guard let root = t.root else { return "" }
         return nodeSignature(root)
     }
