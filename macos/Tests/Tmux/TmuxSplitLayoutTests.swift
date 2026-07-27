@@ -95,4 +95,83 @@ import GhosttyKit
         let nodes = [node(kind: .horizontal, w: 80, h: 24, start: 0, len: 1)]
         #expect(TmuxSplitLayout.build(nodes: nodes, root: 0) == nil)
     }
+
+    // MARK: - signature() tests
+
+    @Test func signatureSinglePane() {
+        let layout = TmuxSplitLayout.pane(id: 42)
+        #expect(layout.signature() == "p42")
+    }
+
+    @Test func signatureHorizontalSplit() {
+        let layout = TmuxSplitLayout.split(
+            direction: .horizontal,
+            ratio: 0.25,
+            left: .pane(id: 1),
+            right: .pane(id: 2))
+        #expect(layout.signature() == "h[0.250:p1,p2]")
+    }
+
+    @Test func signatureVerticalSplit() {
+        let layout = TmuxSplitLayout.split(
+            direction: .vertical,
+            ratio: 0.5,
+            left: .pane(id: 3),
+            right: .pane(id: 4))
+        #expect(layout.signature() == "v[0.500:p3,p4]")
+    }
+
+    @Test func signatureDeterminism() {
+        let layout = TmuxSplitLayout.split(
+            direction: .horizontal,
+            ratio: 1.0 / 3.0,
+            left: .pane(id: 10),
+            right: .split(direction: .vertical, ratio: 0.5,
+                          left: .pane(id: 20), right: .pane(id: 30)))
+        let s1 = layout.signature()
+        let s2 = layout.signature()
+        #expect(s1 == s2)
+    }
+
+    @Test func signatureInequalityDifferentPanes() {
+        let a = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.5,
+            left: .pane(id: 1), right: .pane(id: 2))
+        let b = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.5,
+            left: .pane(id: 1), right: .pane(id: 99))
+        #expect(a.signature() != b.signature())
+    }
+
+    @Test func signatureInequalityDifferentRatios() {
+        let a = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.333,
+            left: .pane(id: 1), right: .pane(id: 2))
+        let b = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.667,
+            left: .pane(id: 1), right: .pane(id: 2))
+        #expect(a.signature() != b.signature())
+    }
+
+    @Test func signatureInequalityDifferentDirections() {
+        let a = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.5,
+            left: .pane(id: 1), right: .pane(id: 2))
+        let b = TmuxSplitLayout.split(
+            direction: .vertical, ratio: 0.5,
+            left: .pane(id: 1), right: .pane(id: 2))
+        #expect(a.signature() != b.signature())
+    }
+
+    @Test func signatureRatioPrecision() {
+        // Ratios differing beyond 3 decimal places should compare equal
+        let a = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.33333,
+            left: .pane(id: 1), right: .pane(id: 2))
+        let b = TmuxSplitLayout.split(
+            direction: .horizontal, ratio: 0.33349,
+            left: .pane(id: 1), right: .pane(id: 2))
+        // Both round to "0.333" at 3 decimal places
+        #expect(a.signature() == b.signature())
+    }
 }

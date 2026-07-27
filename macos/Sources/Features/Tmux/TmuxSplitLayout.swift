@@ -65,3 +65,22 @@ enum TmuxSplitLayout: Equatable {
             right: rest)
     }
 }
+
+// MARK: - Layout signature
+
+extension TmuxSplitLayout {
+    /// Returns a canonical string that captures the layout's pane ids,
+    /// split directions, and split ratios (to 3 decimal places). Two layouts
+    /// that are structurally identical and have the same pane ids and ratios
+    /// produce equal strings. Used by TmuxTerminalController to skip redundant
+    /// tree rebuilds when a windows event does not change the layout.
+    func signature() -> String {
+        switch self {
+        case .pane(let id):
+            return "p\(id)"
+        case .split(let d, let r, let left, let right):
+            let dir = d == .horizontal ? "h" : "v"
+            return "\(dir)[\(String(format: "%.3f", r)):\(left.signature()),\(right.signature())]"
+        }
+    }
+}
