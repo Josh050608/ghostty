@@ -225,6 +225,12 @@ pub const Mailbox = struct {
     }
 };
 
+/// Identifies a surface as a tmux pane surface.
+pub const TmuxPane = struct {
+    router: *anyopaque,
+    pane_id: usize,
+};
+
 /// Context for new surface creation to determine inheritance behavior
 pub const NewSurfaceContext = enum(c_int) {
     window = 0,

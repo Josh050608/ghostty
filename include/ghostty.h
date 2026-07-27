@@ -477,6 +477,8 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  void* tmux_router;
+  uintptr_t tmux_pane_id;
 } ghostty_surface_config_s;
 
 typedef struct {
