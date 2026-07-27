@@ -2717,11 +2717,77 @@ test "send_command queues and emits" {
     var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
 
-    // Manually set up the viewer state to command_queue
-    viewer.state = .command_queue;
-    viewer.session_id = 42;
-
     try testViewer(&viewer, &.{
+        // Full startup sequence (mirrors "initial flow") until command queue is empty
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 42,
+                .name = "main",
+            } } },
+            .contains_command = "display-message",
+        },
+        // Receive version response, which triggers list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 83 44 027b,83x44,0,0[83x20,0,0,0,83x23,0,21,1] main
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+            .contains_command = "capture-pane",
+        },
+        // capture responses for pane 0 primary history
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\Hello, world!
+                ,
+            } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 0 primary visible
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 0 alternate history
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 0 alternate visible
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 1 primary history
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 1 primary visible
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 1 alternate history
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "capture-pane",
+        },
+        // capture response for pane 1 alternate visible; pane_state (list-panes) emitted next
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+        },
+        // pane_state response; command queue now empty
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+        },
         // Queue empty: immediately emit
         .{
             .input = .{ .send_command = "send-keys -t %0 -H 68 69\n" },
