@@ -544,11 +544,7 @@ pub fn Stream(comptime H: type) type {
             // this guard just avoids paying for consumeUntilGround.
             var rest = input;
             if (comptime tmux_takeover_capable) {
-                while (self.tmux_takeover and rest.len > 0) {
-                    self.handler.vt(.dcs_put, rest[0]);
-                    if (!self.handler.tmuxControlActive()) self.tmux_takeover = false;
-                    rest = rest[1..];
-                }
+                if (self.tmux_takeover) rest = rest[self.tmuxTakeoverPeel(rest)..];
                 if (rest.len == 0) return;
             }
 
@@ -592,122 +588,127 @@ pub fn Stream(comptime H: type) type {
             }
             if (offset >= input.len) return;
 
-            // If we're not in the ground state then we process until
-            // we are. This can happen if the last chunk of input put us
-            // in the middle of a control sequence.
-            offset += self.consumeUntilGround(input[offset..]);
-            if (offset >= input.len) return;
-            // consumeUntilGround may have stopped early because a dcs_hook
-            // mid-slice engaged takeover. Peel the remaining bytes through
-            // the takeover path before doing anything else.
-            if (comptime tmux_takeover_capable) {
-                if (self.tmux_takeover) {
-                    while (offset < input.len) {
-                        self.handler.vt(.dcs_put, input[offset]);
-                        offset += 1;
-                        if (!self.handler.tmuxControlActive()) {
-                            self.tmux_takeover = false;
-                            break;
-                        }
-                    }
-                    return;
-                }
-            }
-            offset += self.consumeAllEscapes(input[offset..]);
-            // consumeAllEscapes may have stopped early because a dcs_hook
-            // engaged takeover. Peel remaining bytes through the takeover path.
-            if (comptime tmux_takeover_capable) {
-                if (self.tmux_takeover) {
-                    while (offset < input.len) {
-                        self.handler.vt(.dcs_put, input[offset]);
-                        offset += 1;
-                        if (!self.handler.tmuxControlActive()) {
-                            self.tmux_takeover = false;
-                            break;
-                        }
-                    }
-                    return;
-                }
-            }
-
-            // If we're in the ground state then we can use SIMD to process
-            // input until we see an ESC (0x1B), since all other characters
-            // up to that point are just UTF-8.
-            while (self.parser.state == .ground and offset < input.len) {
-                const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
-                const cps = cp_buf[0..res.decoded];
-
-                // Hand runs of printable codepoints to the handler as
-                // print_slice actions so it can process them with
-                // per-run rather than per-codepoint overhead.
-                var i: usize = 0;
-                while (i < cps.len) {
-                    const cp = cps[i];
-                    if (cp <= 0xF) {
-                        @branchHint(.unlikely);
-                        self.execute(@intCast(cp));
-                        i += 1;
-                        continue;
-                    }
-
-                    // Find the end of the printable run. This is an
-                    // early-exit search loop that LLVM won't
-                    // auto-vectorize, and printable runs dominate real
-                    // input, so scan several codepoints at a time
-                    // manually (same idiom as the printSliceFill run
-                    // scan).
-                    var end = i + 1;
-                    scan: {
-                        if (simd.lanes(u32)) |lanes| {
-                            const V = @Vector(lanes, u32);
-                            const threshold: V = @splat(0xF);
-                            while (end + lanes <= cps.len) {
-                                const v: V = cps[end..][0..lanes].*;
-                                const gt = v > threshold;
-                                if (!@reduce(.And, gt)) {
-                                    const bits: std.meta.Int(.unsigned, lanes) = @bitCast(gt);
-                                    end += @ctz(~bits);
-                                    break :scan;
-                                }
-                                end += lanes;
-                            }
-                        }
-                        while (end < cps.len and cps[end] > 0xF) end += 1;
-                    }
-                    self.handler.vt(.print_slice, .{ .cps = cps[i..end] });
-                    i = end;
-                }
-                // Consume the bytes we just processed.
-                offset += res.consumed;
-
+            // The labeled loop exists for tmux takeover: when a dcs_hook
+            // engages takeover mid-slice, the consume functions stop early
+            // and we peel the remaining bytes straight to the DCS put path.
+            // When takeover deactivates mid-peel (%exit) we loop back to
+            // resume normal parsing of the remainder: the parser is still
+            // in dcs_passthrough, so the trailing ST unhooks it normally.
+            // Without takeover the body runs exactly once.
+            outer: while (offset < input.len) {
+                // If we're not in the ground state then we process until
+                // we are. This can happen if the last chunk of input put us
+                // in the middle of a control sequence.
+                offset += self.consumeUntilGround(input[offset..]);
                 if (offset >= input.len) return;
-
-                // If our offset is NOT an escape then we must have a
-                // partial UTF-8 sequence. In that case, we pass it off
-                // to the scalar parser.
-                if (input[offset] != 0x1B) {
-                    const rem = input[offset..];
-                    for (rem) |c| self.nextUtf8(c);
-                    return;
-                }
-
-                // Process control sequences until we run out.
-                offset += self.consumeAllEscapes(input[offset..]);
-                // Check for mid-slice takeover after escapes inside the SIMD loop.
                 if (comptime tmux_takeover_capable) {
                     if (self.tmux_takeover) {
-                        while (offset < input.len) {
-                            self.handler.vt(.dcs_put, input[offset]);
-                            offset += 1;
-                            if (!self.handler.tmuxControlActive()) {
-                                self.tmux_takeover = false;
-                                break;
-                            }
-                        }
-                        return;
+                        offset += self.tmuxTakeoverPeel(input[offset..]);
+                        continue :outer;
                     }
                 }
+                offset += self.consumeAllEscapes(input[offset..]);
+                if (comptime tmux_takeover_capable) {
+                    if (self.tmux_takeover) {
+                        if (offset >= input.len) return;
+                        offset += self.tmuxTakeoverPeel(input[offset..]);
+                        continue :outer;
+                    }
+                }
+
+                // If we're in the ground state then we can use SIMD to process
+                // input until we see an ESC (0x1B), since all other characters
+                // up to that point are just UTF-8.
+                while (self.parser.state == .ground and offset < input.len) {
+                    const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
+                    const cps = cp_buf[0..res.decoded];
+
+                    // Hand runs of printable codepoints to the handler as
+                    // print_slice actions so it can process them with
+                    // per-run rather than per-codepoint overhead.
+                    var i: usize = 0;
+                    while (i < cps.len) {
+                        const cp = cps[i];
+                        if (cp <= 0xF) {
+                            @branchHint(.unlikely);
+                            self.execute(@intCast(cp));
+                            i += 1;
+                            continue;
+                        }
+
+                        // Find the end of the printable run. This is an
+                        // early-exit search loop that LLVM won't
+                        // auto-vectorize, and printable runs dominate real
+                        // input, so scan several codepoints at a time
+                        // manually (same idiom as the printSliceFill run
+                        // scan).
+                        var end = i + 1;
+                        scan: {
+                            if (simd.lanes(u32)) |lanes| {
+                                const V = @Vector(lanes, u32);
+                                const threshold: V = @splat(0xF);
+                                while (end + lanes <= cps.len) {
+                                    const v: V = cps[end..][0..lanes].*;
+                                    const gt = v > threshold;
+                                    if (!@reduce(.And, gt)) {
+                                        const bits: std.meta.Int(.unsigned, lanes) = @bitCast(gt);
+                                        end += @ctz(~bits);
+                                        break :scan;
+                                    }
+                                    end += lanes;
+                                }
+                            }
+                            while (end < cps.len and cps[end] > 0xF) end += 1;
+                        }
+                        self.handler.vt(.print_slice, .{ .cps = cps[i..end] });
+                        i = end;
+                    }
+                    // Consume the bytes we just processed.
+                    offset += res.consumed;
+
+                    if (offset >= input.len) return;
+
+                    // If our offset is NOT an escape then we must have a
+                    // partial UTF-8 sequence. In that case, we pass it off
+                    // to the scalar parser.
+                    if (input[offset] != 0x1B) {
+                        const rem = input[offset..];
+                        for (rem) |c| self.nextUtf8(c);
+                        return;
+                    }
+
+                    // Process control sequences until we run out.
+                    offset += self.consumeAllEscapes(input[offset..]);
+                    if (comptime tmux_takeover_capable) {
+                        if (self.tmux_takeover) {
+                            if (offset >= input.len) return;
+                            offset += self.tmuxTakeoverPeel(input[offset..]);
+                            continue :outer;
+                        }
+                    }
+                }
+                break :outer;
             }
+        }
+
+        /// Feed bytes straight to the DCS put path while tmux control
+        /// mode owns the stream. Returns the number of bytes consumed.
+        /// Stops early if the handler reports control mode ended
+        /// (%exit) mid-peel; the caller must then resume normal parsing
+        /// of the remaining bytes. The parser is still in dcs_passthrough
+        /// at that point, so the trailing ST unhooks it normally.
+        fn tmuxTakeoverPeel(self: *Self, input: []const u8) usize {
+            comptime assert(tmux_takeover_capable);
+            var offset: usize = 0;
+            while (offset < input.len) {
+                self.handler.vt(.dcs_put, input[offset]);
+                offset += 1;
+                if (!self.handler.tmuxControlActive()) {
+                    self.tmux_takeover = false;
+                    break;
+                }
+            }
+            return offset;
         }
 
         /// Parses back-to-back escape sequences until none are left.
@@ -4169,6 +4170,86 @@ test "tmux takeover engages within the same slice" {
     try testing.expect(h.active);
     try testing.expectEqual(@as(usize, 1), h.outputs);
     try testing.expectEqual(@as(usize, 0), h.exits);
+}
+
+test "tmux takeover releases the remainder of the deactivating slice" {
+    if (comptime !build_options.tmux_control_mode) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const dcs = @import("dcs.zig");
+
+    const H = struct {
+        alloc: std.mem.Allocator,
+        dcs_handler: dcs.Handler = .{},
+        active: bool = false,
+        exits: usize = 0,
+        printed: std.ArrayListUnmanaged(u21) = .empty,
+
+        pub fn tmuxControlActive(self: *@This()) bool {
+            return self.active;
+        }
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .dcs_hook => {
+                    var cmd = self.dcs_handler.hook(self.alloc, value) orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .dcs_put => {
+                    var cmd = self.dcs_handler.put(value) orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .dcs_unhook => {
+                    var cmd = self.dcs_handler.unhook() orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .print => self.printed.append(self.alloc, value.cp) catch {},
+                .print_slice => for (value.cps) |cp| {
+                    self.printed.append(self.alloc, @intCast(cp)) catch {};
+                },
+                else => {},
+            }
+        }
+
+        fn handleTmuxCmd(self: *@This(), cmd: dcs.Command) void {
+            switch (cmd) {
+                .tmux => |notif| switch (notif) {
+                    .enter => self.active = true,
+                    .exit => {
+                        if (!self.active) return;
+                        self.active = false;
+                        self.exits += 1;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    var h: H = .{ .alloc = alloc };
+    defer {
+        h.dcs_handler.deinit();
+        h.printed.deinit(alloc);
+    }
+    var s: Stream(*H) = .init(&h);
+
+    // Control-mode enter, %exit, the trailing ST, and coalesced shell
+    // output all arrive in ONE nextSlice call (e.g. a failed
+    // `tmux -CC attach` whose whole conversation fits in one pty read).
+    // When takeover deactivates mid-slice, the remainder must resume
+    // normal parsing: the trailing ST unhooks the parser and "A" prints.
+    s.nextSlice("\x1bP1000p" ++ "%begin 1 0 0\n%end 1 0 0\n" ++ "%exit\n" ++ "\x1b\\" ++ "A");
+
+    try testing.expect(!h.active);
+    try testing.expectEqual(@as(usize, 1), h.exits);
+    try testing.expect(h.printed.items.len == 1 and h.printed.items[0] == 'A');
 }
 
 test "tmux control mode survives interleaved raw escape sequences" {
