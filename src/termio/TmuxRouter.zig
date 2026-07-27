@@ -22,13 +22,17 @@
 //!   With the split, events_mutex is never held while acquiring any renderer
 //!   mutex, so no cycle is possible.
 //!
-//!   register/unregister acquire the two locks SEQUENTIALLY (map op under
-//!   panes_mutex, release, then event append under events_mutex, release,
-//!   then notify) — they are never nested.  Both are called from
-//!   threadEnter/threadExit, which never hold a renderer mutex.
-//!   unregister uses events → panes → events segment pattern to pre-reserve
-//!   the event slot before pane removal, ensuring the unregistered event
-//!   cannot be lost due to OOM after the pane is already deleted.
+//!   register: (panes_mutex segment: map insertion) → (events_mutex segment:
+//!   event append) → notify. Never nests the two locks.
+//!
+//!   unregister: (events_mutex segment: capacity reserve) → (panes_mutex
+//!   segment: pane removal) → (events_mutex segment: event append) → notify.
+//!   Never nests the two locks. Uses events → panes → events pattern to
+//!   pre-reserve the event slot before pane removal, ensuring the unregistered
+//!   event cannot be lost due to OOM after the pane is already deleted.
+//!
+//!   Both are called from threadEnter/threadExit, which never hold a renderer
+//!   mutex.
 //!
 //!   unref teardown takes neither lock: refcount == 0 guarantees
 //!   exclusivity.
@@ -130,6 +134,8 @@ pub fn unregister(self: *TmuxRouter, pane_id: usize) void {
         defer self.events_mutex.unlock(global.io());
         self.events.appendAssumeCapacity(.{ .unregistered = pane_id });
     }
+    // Notify even if the event was dropped (OOM path) so the IO thread
+    // observes the pane removal.
     self.wakeup.notify() catch {};
 }
 
@@ -227,7 +233,7 @@ test "unregister always emits the unregistered event" {
     const router = try TmuxRouter.create(alloc, wakeup);
     defer router.unref();
 
-    var io: termio.Termio = undefined; // 仅作指针占位,不解引用
+    var io: termio.Termio = undefined; // pointer placeholder only; never dereferenced
     try router.register(7, &io);
     router.unregister(7);
 

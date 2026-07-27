@@ -24,6 +24,8 @@ test/cases/**/*.actual.png
 flatpak/builddir/
 flatpak/repo/
 
+.claude/scheduled_tasks.lock
+
 glad.zip
 /Box_test.ppm
 /Box_test_diff.ppm
