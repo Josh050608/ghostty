@@ -64,6 +64,10 @@ class TmuxTerminalController: TerminalController {
     /// (used during session teardown or after tmux itself removed the window).
     func tmuxForceClose() {
         forceClosing = true
+        // Cancel any pending resize work item so we don't extend the controller's
+        // lifetime unnecessarily after the window has been force-closed.
+        pendingResize?.cancel()
+        pendingResize = nil
         window?.close()
     }
 
@@ -235,14 +239,22 @@ class TmuxTerminalController: TerminalController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }
 
-    /// Translate the content-view pixel bounds to a tmux client grid.
+    /// Translate the usable content area to a tmux client grid.
     /// Cell metrics come from any live pane surface (font is uniform across
     /// all panes); tmux drives per-pane dimensions via the layout it sends back.
+    ///
+    /// We use `window.contentLayoutRect` (in points) rather than
+    /// `contentView.bounds` to get the area that excludes the titlebar.
+    /// For a standard window `contentLayoutRect` stops below the titlebar.
+    /// For `HiddenTitlebarTerminalWindow` (window-decorations=false,
+    /// styleMask includes .fullSizeContentView) the class overrides
+    /// `contentLayoutRect` to return the full frame height (lines 100-104 of
+    /// HiddenTitlebarTerminalWindow.swift), so both window styles produce the
+    /// correct usable rect without any special-casing here.
     private func sendTmuxResize() {
         guard !forceClosing,
               let session, !session.isTearingDown,
               let window,
-              let contentView = window.contentView,
               let anyPane = surfaceTree.first(where: { $0.surface != nil }),
               let surface = anyPane.surface
         else { return }
@@ -250,8 +262,9 @@ class TmuxTerminalController: TerminalController {
         let size = ghostty_surface_size(surface)
         guard size.cell_width_px > 0, size.cell_height_px > 0 else { return }
         let scale = window.backingScaleFactor
-        let cols = Int((contentView.bounds.width * scale) / CGFloat(size.cell_width_px))
-        let rows = Int((contentView.bounds.height * scale) / CGFloat(size.cell_height_px))
+        let layoutRect = window.contentLayoutRect
+        let cols = Int((layoutRect.width * scale) / CGFloat(size.cell_width_px))
+        let rows = Int((layoutRect.height * scale) / CGFloat(size.cell_height_px))
         session.sendResize(cols: cols, rows: rows)
     }
 
