@@ -24,9 +24,16 @@ enum TmuxSplitLayout: Equatable {
             return .pane(id: node.paneId)
         case .horizontal, .vertical:
             let dir: Direction = node.kind == .horizontal ? .horizontal : .vertical
+            // The Zig flattener (serializeTmuxWindowsAlloc's post-order flattenLayout)
+            // appends children BEFORE their parent, so for any split node at index `root`
+            // the invariant `childrenStart + childrenLen <= root` holds. Enforcing it here
+            // makes every recursive descent strictly decrease the maximum reachable index,
+            // proving termination and preventing cycles where a node's children range
+            // includes itself or an ancestor (which would cause infinite recursion).
             guard node.childrenLen >= 1,
                   node.childrenStart >= 0,
-                  node.childrenStart + node.childrenLen <= nodes.count
+                  node.childrenStart + node.childrenLen <= nodes.count,
+                  node.childrenStart + node.childrenLen <= root
             else { return nil }
             return buildRun(
                 nodes: nodes, direction: dir,

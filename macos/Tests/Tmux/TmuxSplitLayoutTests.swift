@@ -87,4 +87,12 @@ import GhosttyKit
         let empty = [node(kind: .horizontal, w: 80, h: 24, start: 0, len: 0)]
         #expect(TmuxSplitLayout.build(nodes: empty, root: 0) == nil)
     }
+
+    @Test func selfReferencingNodeReturnsNil() {
+        // A horizontal node at index 0 whose children range includes itself
+        // (childrenStart:0, childrenLen:1 → children = [0]) would recurse forever
+        // without a cycle guard. With the post-order invariant guard it returns nil.
+        let nodes = [node(kind: .horizontal, w: 80, h: 24, start: 0, len: 1)]
+        #expect(TmuxSplitLayout.build(nodes: nodes, root: 0) == nil)
+    }
 }
