@@ -317,6 +317,9 @@ class AppDelegate: NSObject,
         // Setup signal handlers
         setupSignals()
 
+        // Start routing tmux control mode events to session controllers.
+        _ = TmuxSessionManager.shared
+
         switch Ghostty.launchSource {
         case .app:
             // Don't have to do anything.
