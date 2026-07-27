@@ -722,6 +722,54 @@ pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !voi
     try self.queueWrite(td, writer.buffered(), false);
 }
 
+/// Replace our terminal with a tmux-captured one. Called from the
+/// host surface's IO thread via TmuxRouter while it holds the router
+/// mutex; we take our own renderer lock here (lock order: router ->
+/// our renderer mutex).
+pub fn tmuxReplaceTerminal(self: *Termio, t: *terminalpkg.Terminal) void {
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.terminal.deinit(self.alloc);
+        self.terminal = t.*;
+    }
+    self.alloc.destroy(t);
+    self.renderer_wakeup.notify() catch |err| {
+        log.warn("failed to notify renderer err={}", .{err});
+    };
+}
+
+/// Drain pending TmuxRouter events (pane registrations and commands
+/// from pane surfaces). Called on our IO thread after each mailbox
+/// drain. No-op when tmux control mode is inactive.
+pub fn tmuxDrainRouter(self: *Termio) void {
+    if (comptime !StreamHandler.tmux_enabled) return;
+    const handler = &self.terminal_stream.handler;
+    const router = handler.tmux_router orelse return;
+
+    var events: std.ArrayListUnmanaged(termio.TmuxRouter.Event) = .empty;
+    defer events.deinit(self.alloc);
+    router.drainEvents(&events, self.alloc) catch |err| {
+        log.warn("tmux router drain failed err={}", .{err});
+        return;
+    };
+    if (events.items.len == 0) return;
+
+    // Viewer access requires the renderer mutex (same contract as
+    // processOutput).
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    for (events.items) |ev| switch (ev) {
+        .registered => |id| handler.handleTmuxInput(.{ .pane_registered = id }),
+        .unregistered => |id| handler.handleTmuxInput(.{ .pane_unregistered = id }),
+        .command => |cmd| {
+            defer router.alloc.free(cmd);
+            handler.handleTmuxInput(.{ .send_command = cmd });
+        },
+    };
+}
+
 /// ThreadData is the data created and stored in the termio thread
 /// when the thread is started and destroyed when the thread is
 /// stopped.

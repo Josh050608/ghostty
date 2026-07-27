@@ -68,6 +68,10 @@ pub const StreamHandler = struct {
     /// The tmux control mode viewer state.
     tmux_viewer: if (tmux_enabled) ?*terminal.tmux.Viewer else void = if (tmux_enabled) null else {},
 
+    /// The tmux pane router, created together with the viewer.
+    tmux_router: if (tmux_enabled) ?*termio.TmuxRouter else void =
+        if (tmux_enabled) null else {},
+
     /// This is set to true when a message was written to the termio
     /// mailbox. This can be used by callers to determine if they need
     /// to wake up the termio thread.
@@ -489,6 +493,32 @@ pub const StreamHandler = struct {
                 self.messageWriter(msg);
             },
         }
+    }
+
+    /// Feed an input into the tmux viewer and process the resulting
+    /// actions. Task 8 extends this to handle all action types.
+    pub fn handleTmuxInput(
+        self: *StreamHandler,
+        input: terminal.tmux.Viewer.Input,
+    ) void {
+        if (comptime !tmux_enabled) return;
+        const viewer = self.tmux_viewer orelse return;
+        for (viewer.next(input)) |action| switch (action) {
+            .command => |command| {
+                self.messageWriter(termio.Message.writeReq(
+                    self.alloc,
+                    command,
+                ) catch |err| {
+                    log.warn("tmux command dropped err={}", .{err});
+                    return;
+                });
+            },
+            .pane_take => |take| {
+                take.terminal.deinit(self.alloc);
+                self.alloc.destroy(take.terminal);
+            },
+            else => log.info("tmux action (unhandled until task 8)={f}", .{action}),
+        };
     }
 
     pub fn apcEnd(self: *StreamHandler) !void {
