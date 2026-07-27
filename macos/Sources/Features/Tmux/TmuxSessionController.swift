@@ -13,12 +13,16 @@ final class TmuxSessionController {
     private(set) var router: UnsafeMutableRawPointer?
     private(set) var isTearingDown = false
 
-    /// tmux window id -> native tab controller (Task 8).
+    /// tmux window id -> native tab controller.
     var windows: [UInt: TmuxTerminalController] = [:]
     /// tmux pane id -> its surface view. Panes are create-once: a pane
     /// id never comes back after its surface is gone (detached is a
     /// terminal state core-side and tmux never reuses ids).
     var panes: [UInt: Ghostty.SurfaceView] = [:]
+
+    /// Each session gets its own tabbingIdentifier so its tabs are
+    /// isolated from ordinary terminal windows and from other sessions.
+    private let tabbingId = "com.mitchellh.ghostty.tmux." + UUID().uuidString
 
     init(
         ghostty: Ghostty.App,
@@ -31,11 +35,130 @@ final class TmuxSessionController {
         Ghostty.logger.info("tmux session attached")
     }
 
+    // MARK: - Windows diff
+
     func apply(_ ev: Ghostty.TmuxWindows) {
         guard !isTearingDown else { return }
-        // Task 8 implements the diff; log for now.
-        Ghostty.logger.info("tmux windows event count=\(ev.windows.count)")
+        let incoming = Dictionary(uniqueKeysWithValues: ev.windows.map { ($0.id, $0) })
+
+        // tmux removed these windows: close their tabs without
+        // commands or confirmation (tmux already acted).
+        for (id, controller) in windows where incoming[id] == nil {
+            windows[id] = nil
+            controller.tmuxForceClose()
+        }
+
+        // Added or kept windows, in tmux order.
+        for w in ev.windows {
+            if let existing = windows[w.id] {
+                existing.tmuxUpdate(window: w, nodes: ev.nodes) // Task 9
+            } else {
+                addWindow(w, nodes: ev.nodes)
+            }
+        }
+
+        prunePanes(keeping: ev)
     }
+
+    private func addWindow(_ w: Ghostty.TmuxWindow, nodes: [Ghostty.TmuxNode]) {
+        guard let layout = TmuxSplitLayout.build(nodes: nodes, root: w.root),
+              let tree = makeTree(layout)
+        else {
+            Ghostty.logger.warning("tmux window \(w.id) layout invalid, skipped")
+            return
+        }
+
+        let controller = TmuxTerminalController(
+            ghostty,
+            session: self,
+            tmuxWindowId: w.id,
+            tree: tree)
+        controller.titleOverride = w.name
+        windows[w.id] = controller
+
+        // Force the window to load (via NIB) before we configure it.
+        // TerminalController.window is loaded lazily on first access,
+        // just like the newTab static does before calling showWindow.
+        guard let window = controller.window else {
+            Ghostty.logger.warning("tmux window \(w.id): window failed to load, skipped")
+            return
+        }
+
+        window.isRestorable = false
+        window.tabbingIdentifier = tabbingId
+
+        // If another live tmux window exists for this session, join its
+        // tab group. Prefer the last window in the tab group (matches
+        // newTab "end" position behavior).
+        if let groupWindow = anyLiveWindow(), groupWindow !== window {
+            if let lastInGroup = groupWindow.tabGroup?.windows.last {
+                lastInGroup.addTabbedWindowSafely(window, ordered: .above)
+            } else {
+                groupWindow.addTabbedWindowSafely(window, ordered: .above)
+            }
+        }
+
+        controller.showWindow(nil)
+    }
+
+    private func anyLiveWindow() -> NSWindow? {
+        windows.values.compactMap(\.window).first
+    }
+
+    /// Drop cached panes that no longer appear in any window's layout.
+    /// Their views were already released by the tree replacements; the
+    /// core marks them detached when the surface unregisters.
+    private func prunePanes(keeping ev: Ghostty.TmuxWindows) {
+        var live = Set<UInt>()
+        for node in ev.nodes where node.kind == .pane { live.insert(node.paneId) }
+        panes = panes.filter { live.contains($0.key) }
+    }
+
+    // MARK: - Pane surface factory
+
+    /// Get or create the surface view for a tmux pane. Create-once:
+    /// once a pane's surface is gone the id never comes back (tmux
+    /// does not reuse ids), so a cache hit is always the live view.
+    func surfaceView(forPane id: UInt) -> Ghostty.SurfaceView? {
+        if let view = panes[id] { return view }
+        guard let app = ghostty.app else { return nil }
+        var config = Ghostty.SurfaceConfiguration()
+        config.tmuxRouter = router
+        config.tmuxPaneId = id
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        panes[id] = view
+        return view
+    }
+
+    func paneId(of view: Ghostty.SurfaceView) -> UInt? {
+        panes.first(where: { $0.value === view })?.key
+    }
+
+    // MARK: - Tree construction
+
+    func makeTree(_ layout: TmuxSplitLayout) -> SplitTree<Ghostty.SurfaceView>? {
+        guard let node = makeNode(layout) else { return nil }
+        return SplitTree(root: node, zoomed: nil)
+    }
+
+    private func makeNode(_ layout: TmuxSplitLayout) -> SplitTree<Ghostty.SurfaceView>.Node? {
+        switch layout {
+        case .pane(let id):
+            guard let view = surfaceView(forPane: id) else { return nil }
+            return .leaf(view: view)
+        case .split(let direction, let ratio, let left, let right):
+            guard let l = makeNode(left), let r = makeNode(right) else { return nil }
+            let splitDir: SplitTree<Ghostty.SurfaceView>.Direction =
+                direction == .horizontal ? .horizontal : .vertical
+            return .split(.init(
+                direction: splitDir,
+                ratio: ratio,
+                left: l,
+                right: r))
+        }
+    }
+
+    // MARK: - Session lifecycle
 
     /// End of session (%exit or host death): close every native window
     /// without emitting tmux commands, then drop our router reference.
@@ -62,22 +185,5 @@ final class TmuxSessionController {
 
     deinit {
         releaseRouter()
-    }
-}
-
-/// A TerminalController for one tmux window (= one native tab in the
-/// session's dedicated window group). Task 8+ fill in construction,
-/// close mapping and resize.
-class TmuxTerminalController: TerminalController {
-    weak var session: TmuxSessionController?
-    var tmuxWindowId: UInt = 0
-    private var forceClosing = false
-
-    /// Close this window bypassing tmux command mapping and
-    /// confirmations (used during session teardown or after tmux
-    /// itself removed the window).
-    func tmuxForceClose() {
-        forceClosing = true
-        window?.close()
     }
 }

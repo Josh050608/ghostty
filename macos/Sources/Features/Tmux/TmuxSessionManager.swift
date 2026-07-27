@@ -26,11 +26,19 @@ final class TmuxSessionManager {
 
         switch event {
         case .attach(let router):
-            guard sessions[key] == nil else {
-                // Duplicate attach for a live session: we own the new
-                // reference, give it back.
-                ghostty_tmux_router_release(router)
-                return
+            if let existing = sessions[key] {
+                if existing.hostView != nil {
+                    // True duplicate: the session is still alive (hostView present).
+                    // Release the new router and do nothing.
+                    ghostty_tmux_router_release(router)
+                    return
+                } else {
+                    // Stale ghost: the host surface died without an %exit event
+                    // (e.g. force-quit). Tear down the stale controller so we can
+                    // replace it with the fresh attach below.
+                    existing.teardown()
+                    sessions[key] = nil
+                }
             }
             guard let appDelegate = NSApp.delegate as? AppDelegate else {
                 ghostty_tmux_router_release(router)
