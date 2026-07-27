@@ -653,6 +653,12 @@ extension Ghostty {
         /// Context for surface creation
         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
+        /// Non-nil marks this surface as a tmux pane surface for the given
+        /// router (opaque pointer from the tmux attach action) and pane id.
+        /// The core then uses the TmuxPane termio backend: no subprocess.
+        var tmuxRouter: UnsafeMutableRawPointer? = nil
+        var tmuxPaneId: UInt = 0
+
         init() {}
 
         init(from config: ghostty_surface_config_s) {
@@ -675,6 +681,8 @@ extension Ghostty {
                 }
             }
             self.context = config.context
+            self.tmuxRouter = config.tmux_router
+            self.tmuxPaneId = UInt(config.tmux_pane_id)
         }
 
         /// Provides a C-compatible ghostty configuration within a closure. The configuration
@@ -710,6 +718,10 @@ extension Ghostty {
 
             // Set context
             config.context = context
+
+            // Set tmux router and pane id for tmux pane surfaces
+            config.tmux_router = tmuxRouter
+            config.tmux_pane_id = tmuxPaneId
 
             // Use withCString to ensure strings remain valid for the duration of the closure
             return try workingDirectory.withCString { cWorkingDir in

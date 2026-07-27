@@ -2246,26 +2246,43 @@ extension Ghostty {
             target: ghostty_target_s,
             v: ghostty_action_tmux_s)
         {
-            // Plan 1: log only. Plan 2 replaces this with the
-            // TmuxSessionController pipeline.
+            // Locate the host surface. If missing, release any router reference
+            // from an attach payload to avoid a memory leak.
+            guard target.tag == GHOSTTY_TARGET_SURFACE,
+                  let surface = target.target.surface,
+                  let surfaceView = self.surfaceView(from: surface)
+            else {
+                // The attach payload carries a router reference owned by the
+                // GUI; if we can't deliver it, release it or it leaks.
+                if v.tag == GHOSTTY_TMUX_ATTACH, let router = v.value.attach.router {
+                    ghostty_tmux_router_release(router)
+                }
+                Ghostty.logger.warning("tmux action dropped: no surface target")
+                return
+            }
+
+            let event: Ghostty.TmuxEvent
             switch v.tag {
             case GHOSTTY_TMUX_ATTACH:
-                Ghostty.logger.info("tmux: attach")
+                guard let router = v.value.attach.router else { return }
+                event = .attach(router: router)
             case GHOSTTY_TMUX_WINDOWS:
-                let w = v.value.windows
-                Ghostty.logger.info("tmux: windows count=\(w.windows_len) nodes=\(w.nodes_len)")
-                if let windows = w.windows {
-                    for i in 0..<Int(w.windows_len) {
-                        let win = windows[i]
-                        let name = String(cString: win.name)
-                        Ghostty.logger.info("tmux: window id=\(win.id) name=\(name, privacy: .public) \(win.width)x\(win.height)")
-                    }
+                guard let w = Ghostty.TmuxWindows(from: v.value.windows) else {
+                    Ghostty.logger.warning("tmux windows payload malformed, dropped")
+                    return
                 }
+                event = .windows(w)
             case GHOSTTY_TMUX_EXIT:
-                Ghostty.logger.info("tmux: exit")
+                event = .exit
             default:
                 Ghostty.logger.warning("tmux: unknown tag=\(v.tag.rawValue)")
+                return
             }
+
+            NotificationCenter.default.post(
+                name: Ghostty.Notification.ghosttyTmux,
+                object: surfaceView,
+                userInfo: [Ghostty.Notification.TmuxEventKey: event])
         }
 
         private static func colorChange(

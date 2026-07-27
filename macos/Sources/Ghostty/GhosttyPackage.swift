@@ -450,6 +450,10 @@ extension Ghostty.Notification {
     /// Notifications related to key tables
     static let didChangeKeyTable = Notification.Name("com.mitchellh.ghostty.didChangeKeyTable")
     static let KeyTableKey = didChangeKeyTable.rawValue + ".action"
+
+    /// Tmux control mode event. Object is the host SurfaceView.
+    static let ghosttyTmux = Notification.Name("com.mitchellh.ghostty.tmux")
+    static let TmuxEventKey = ghosttyTmux.rawValue + ".event"
 }
 
 // Make the input enum hashable.
