@@ -66,6 +66,27 @@ extension Ghostty {
         var childrenStart: Int
         var childrenLen: Int
 
+        /// Memberwise initializer for testing and internal construction.
+        init(
+            kind: Kind,
+            paneId: UInt = 0,
+            x: UInt = 0,
+            y: UInt = 0,
+            width: UInt,
+            height: UInt,
+            childrenStart: Int = 0,
+            childrenLen: Int = 0
+        ) {
+            self.kind = kind
+            self.paneId = paneId
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+            self.childrenStart = childrenStart
+            self.childrenLen = childrenLen
+        }
+
         init?(from c: ghostty_action_tmux_node_s) {
             switch c.kind {
             case GHOSTTY_ACTION_TMUX_NODE_KIND_PANE: kind = .pane
