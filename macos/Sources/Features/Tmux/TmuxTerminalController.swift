@@ -61,6 +61,105 @@ class TmuxTerminalController: TerminalController {
         window?.close()
     }
 
+    // MARK: - Close mapping → tmux commands
+
+    /// Confirms closure for surfaces that have running processes (needsConfirmQuit).
+    /// If `surfaces` is empty the `onConfirm` block is executed immediately.
+    /// Otherwise a standard close-confirmation alert is shown; `onConfirm` is only
+    /// called if the user chooses to proceed.
+    private func confirmTmux(
+        surfaces: [Ghostty.SurfaceView],
+        onConfirm: @escaping () -> Void
+    ) {
+        guard !surfaces.isEmpty else {
+            onConfirm()
+            return
+        }
+        confirmClose(
+            messageText: "Close Terminal?",
+            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+        ) {
+            onConfirm()
+        }
+    }
+
+    /// Tab close (⌘W / tab close button) → kill-window.
+    /// The tab disappears when tmux confirms via the next windows event.
+    @IBAction override func closeTab(_ sender: Any?) {
+        guard !forceClosing, let session, !session.isTearingDown else {
+            super.closeTab(sender)
+            return
+        }
+        let needsConfirm = surfaceTree.filter { $0.needsConfirmQuit }
+        confirmTmux(surfaces: needsConfirm) { [weak self] in
+            guard let self, let session = self.session else { return }
+            session.send(ghostty_tmux_command_s(
+                tag: GHOSTTY_TMUX_COMMAND_KILL_WINDOW,
+                id: UInt(self.tmuxWindowId),
+                width: 0,
+                height: 0))
+        }
+    }
+
+    /// Window close (red button / ⌘⇧W) → detach-client.
+    /// The tmux session survives (detached) and %exit tears down every tab.
+    /// No confirmation — detach is non-destructive; the session is preserved.
+    @IBAction override func closeWindow(_ sender: Any?) {
+        guard !forceClosing, let session, !session.isTearingDown else {
+            super.closeWindow(sender)
+            return
+        }
+        session.send(ghostty_tmux_command_s(
+            tag: GHOSTTY_TMUX_COMMAND_DETACH,
+            id: 0,
+            width: 0,
+            height: 0))
+    }
+
+    /// Split pane close → kill-pane.
+    /// Intercepted here only when a non-root node is being closed (split pane).
+    /// Root-node close is routed by TerminalController.closeSurface to closeTab/closeWindow
+    /// which are already overridden above.
+    override func closeSurface(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        withConfirmation: Bool = true
+    ) {
+        // Let the teardown / force-close path fall through to super.
+        guard !forceClosing, let session, !session.isTearingDown else {
+            super.closeSurface(node, withConfirmation: withConfirmation)
+            return
+        }
+
+        // Root-node closures are routed by TerminalController.closeSurface to
+        // closeTab or closeWindow (both already overridden), so let super handle them.
+        if surfaceTree.root == node {
+            super.closeSurface(node, withConfirmation: withConfirmation)
+            return
+        }
+
+        // Non-root: this is a split pane. Find the pane id and kill-pane.
+        // We gather all surface views in the node to check needsConfirmQuit.
+        let surfaces: [Ghostty.SurfaceView] = Array(node)
+        let needsConfirm = withConfirmation ? surfaces.filter { $0.needsConfirmQuit } : []
+
+        // We need one representative pane id to send to tmux. Use the leftmost leaf view.
+        let leafView = node.leftmostLeaf()
+        guard let paneId = session.paneId(of: leafView) else {
+            // Pane not mapped — fall back to super (may happen if the pane was
+            // already removed by tmux before the gesture arrived).
+            super.closeSurface(node, withConfirmation: withConfirmation)
+            return
+        }
+
+        confirmTmux(surfaces: needsConfirm) { [weak self] in
+            self?.session?.send(ghostty_tmux_command_s(
+                tag: GHOSTTY_TMUX_COMMAND_KILL_PANE,
+                id: UInt(paneId),
+                width: 0,
+                height: 0))
+        }
+    }
+
     // MARK: - Focus → select-pane
 
     /// Override syncFocusToSurfaceTree (called from focusedSurface.didSet in Base)
