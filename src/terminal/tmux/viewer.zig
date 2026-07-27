@@ -267,6 +267,11 @@ pub const Viewer = struct {
 
         /// A pane surface unregistered (it is being torn down).
         pane_unregistered: usize,
+
+        /// Send a raw command to tmux through the command queue. The
+        /// string must include the trailing newline. The memory only
+        /// needs to live for the duration of the call.
+        send_command: []const u8,
     };
 
     pub const Window = struct {
@@ -367,6 +372,7 @@ pub const Viewer = struct {
             .tmux => self.nextTmux(input.tmux),
             .pane_registered => |id| self.paneRegistered(id),
             .pane_unregistered => |id| self.paneUnregistered(id),
+            .send_command => |cmd| self.sendCommand(cmd),
         };
     }
 
@@ -645,6 +651,27 @@ pub const Viewer = struct {
             .detached => {},
         }
         return &.{};
+    }
+
+    fn sendCommand(self: *Viewer, cmd: []const u8) []const Action {
+        assert(cmd.len > 0 and cmd[cmd.len - 1] == '\n');
+        if (self.state != .command_queue) {
+            log.info("dropping command, viewer not ready state={}", .{self.state});
+            return &.{};
+        }
+
+        const was_empty = self.command_queue.empty();
+        const owned = self.alloc.dupe(u8, cmd) catch return self.defunct();
+        self.queueCommands(&.{.{ .user = owned }}) catch {
+            self.alloc.free(owned);
+            return self.defunct();
+        };
+        if (!was_empty) return &.{};
+
+        // Nothing in flight: emit the command immediately. The command
+        // string for .user is the command itself; reference the queued
+        // copy which lives until the command completes.
+        return self.singleAction(.{ .command = owned });
     }
 
     /// True while commands that populate this pane are still queued.
@@ -2684,4 +2711,37 @@ test "window name parsed and renamed" {
             }).check,
         },
     });
+}
+
+test "send_command queues and emits" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    // Manually set up the viewer state to command_queue
+    viewer.state = .command_queue;
+    viewer.session_id = 42;
+
+    try testViewer(&viewer, &.{
+        // Queue empty: immediately emit
+        .{
+            .input = .{ .send_command = "send-keys -t %0 -H 68 69\n" },
+            .contains_command = "send-keys -t %0 -H 68 69",
+        },
+        // Previous command not complete: only queue
+        .{ .input = .{ .send_command = "send-keys -t %0 -H 6a\n" } },
+        // Previous command complete: next one auto-emits (nextCommand existing logic)
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .contains_command = "send-keys -t %0 -H 6a",
+        },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+    });
+}
+
+test "send_command before ready is dropped" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+    // startup_block state: directly send without crash, no action
+    const actions = viewer.next(.{ .send_command = "kill-window -t @1\n" });
+    try testing.expectEqual(@as(usize, 0), actions.len);
 }
