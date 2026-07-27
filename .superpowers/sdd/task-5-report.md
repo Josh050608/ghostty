@@ -107,3 +107,59 @@ Test case 'GhosttyTmuxTests/windowsDeepCopy()' passed (0.000 seconds)
 ### Commit
 
 `d2b0698e1 fix(macos): reject negative tmux root indices, mark TmuxEvent Sendable`
+
+## Fix Round 2
+
+### Why the Previous Fix Was Wrong
+
+Fix Round 1 used `Int(c.root)` — a CHECKED UInt→Int conversion that traps
+(crashes the process) for values > Int.max (e.g. UInt.max). The `w.root < 0`
+validation in `TmuxWindows.init?` was therefore unreachable dead code: the
+process would have already trapped inside `TmuxWindow.init` before ever
+reaching the validation loop. The test `windowsRejectsNegativeRoot` with
+`root: UInt.max` would crash the test runner, not pass.
+
+The same trap existed for `childrenStart = Int(c.children_start)` and
+`childrenLen = Int(c.children_len)` in `TmuxNode.init?`.
+
+### Changes
+
+1. **`TmuxWindow.init` made failable** — changed to `init?(from:)` using
+   `guard let root = Int(exactly: c.root) else { return nil }`. Values that
+   cannot fit in Int (e.g. UInt.max) now return nil instead of trapping.
+
+2. **`TmuxWindows.init?` propagates nil** — changed to
+   `guard let w = TmuxWindow(from: cw[i]) else { return nil }`. Removed the
+   now-dead `w.root < 0` clause; kept `w.root >= nodes.count` (uintptr_t is
+   unsigned; Int(exactly:) already excludes values > Int.max, so root is
+   never negative here).
+
+3. **`TmuxNode.init?` uses exact conversion** — `childrenStart` and
+   `childrenLen` now use `Int(exactly:)` via a combined guard.
+
+4. **`@unchecked Sendable` justification comment** added at the declaration
+   site of `TmuxEvent`, explaining the router pointer is an opaque token
+   never dereferenced in Swift, passed only to thread-safe C APIs.
+
+5. **Test renamed and extended**:
+   - `windowsRejectsNegativeRoot` → `windowsRejectsOversizedRoot` (name
+     now accurately describes what's tested: root > Int.max, not negativity)
+   - Added `nodeRejectsOversizedChildrenStart` to verify `children_start:
+     UInt.max` also returns nil.
+
+### Verbatim Test Output
+
+```
+Test suite 'GhosttyTmuxTests' started on 'My Mac - Ghostty (88358)'
+Test case 'GhosttyTmuxTests/nodeRejectsOversizedChildrenStart()' passed on 'My Mac - Ghostty (88358)' (0.000 seconds)
+Test case 'GhosttyTmuxTests/nodeRejectsUnknownKind()' passed on 'My Mac - Ghostty (88358)' (0.000 seconds)
+Test case 'GhosttyTmuxTests/windowsRejectsOversizedRoot()' passed on 'My Mac - Ghostty (88358)' (0.000 seconds)
+Test case 'GhosttyTmuxTests/windowsDeepCopy()' passed on 'My Mac - Ghostty (88358)' (0.000 seconds)
+** TEST SUCCEEDED **
+```
+
+4 tests, 0 failures.
+
+### Commit
+
+`1a04c0cdebb73970710bc8a0dae70c4f059803e9 fix(macos): reject oversized tmux indices via exact conversion`
