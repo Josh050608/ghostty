@@ -4,13 +4,13 @@ extension Ghostty {
     /// A tmux control mode event delivered via GHOSTTY_ACTION_TMUX.
     /// All payloads are deep copies: the C arrays are only valid during
     /// the action callback.
-    enum TmuxEvent {
+    enum TmuxEvent: @unchecked Sendable {
         case attach(router: UnsafeMutableRawPointer)
         case windows(TmuxWindows)
         case exit
     }
 
-    struct TmuxWindows: Equatable {
+    struct TmuxWindows: Equatable, Sendable {
         var windows: [TmuxWindow] = []
         var nodes: [TmuxNode] = []
 
@@ -26,12 +26,12 @@ extension Ghostty {
                     nodes.append(node)
                 }
             }
-            // Window roots must be valid node indices.
-            for w in windows where w.root >= nodes.count { return nil }
+            // Window roots must be valid node indices (non-negative and within bounds).
+            for w in windows where w.root < 0 || w.root >= nodes.count { return nil }
         }
     }
 
-    struct TmuxWindow: Equatable {
+    struct TmuxWindow: Equatable, Sendable {
         var id: UInt
         var name: String
         var width: UInt
@@ -47,7 +47,7 @@ extension Ghostty {
         }
     }
 
-    struct TmuxNode: Equatable {
+    struct TmuxNode: Equatable, Sendable {
         enum Kind: Equatable { case pane, horizontal, vertical }
 
         var kind: Kind

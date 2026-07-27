@@ -37,4 +37,25 @@ import GhosttyKit
             children_start: 0, children_len: 0)
         #expect(Ghostty.TmuxNode(from: bad) == nil)
     }
+
+    @Test func windowsRejectsNegativeRoot() throws {
+        var nodes = [ghostty_action_tmux_node_s(
+            kind: GHOSTTY_ACTION_TMUX_NODE_KIND_PANE,
+            pane_id: 5, x: 0, y: 0, width: 80, height: 24,
+            children_start: 0, children_len: 0)]
+        let name = strdup("test")!
+        defer { free(name) }
+        // Use UInt.max as root, which wraps to -1 as Int
+        var windows = [ghostty_action_tmux_window_s(
+            id: 1, name: name, width: 80, height: 24, root: UInt.max)]
+
+        let copied: Ghostty.TmuxWindows? = windows.withUnsafeBufferPointer { wp in
+            nodes.withUnsafeBufferPointer { np in
+                Ghostty.TmuxWindows(from: ghostty_action_tmux_windows_s(
+                    windows: wp.baseAddress, windows_len: 1,
+                    nodes: np.baseAddress, nodes_len: 1))
+            }
+        }
+        #expect(copied == nil)
+    }
 }
