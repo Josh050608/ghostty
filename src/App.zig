@@ -492,10 +492,16 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
     // a simple linear search here.
     if (self.hasSurface(surface)) {
         try surface.handleMessage(msg);
+        return;
     }
 
     // Window was not found, it probably quit before we handled the message.
-    // Not a problem.
+    // Free any heap-owning message variants so we don't leak their memory.
+    // tmux events own an ArenaAllocator; receiver must call deinit().
+    switch (msg) {
+        .tmux => |ev| ev.deinit(),
+        else => {},
+    }
 }
 
 fn hasSurface(self: *const App, surface: *const Surface) bool {
