@@ -369,6 +369,15 @@ pub const StreamHandler = struct {
         }
     }
 
+    /// True while tmux control mode is active. The terminal stream
+    /// queries this to take over byte framing (raw interleaved escape
+    /// sequences must not reach the VT parser's anywhere-ESC
+    /// transition, which would unhook the DCS and kill control mode).
+    pub fn tmuxControlActive(self: *StreamHandler) bool {
+        if (comptime !tmux_enabled) return false;
+        return self.tmux_viewer != null;
+    }
+
     pub inline fn dcsHook(self: *StreamHandler, dcs: terminal.DCS) !void {
         var cmd = self.dcs.hook(self.alloc, dcs) orelse return;
         defer cmd.deinit();
@@ -608,6 +617,11 @@ pub const StreamHandler = struct {
     /// Tear down tmux state and notify the apprt surface.
     fn tmuxExit(self: *StreamHandler) void {
         if (comptime !tmux_enabled) return;
+
+        // Idempotent: this can be reached twice for one session (the
+        // %exit notification, then the DCS unhook from the trailing
+        // ST). Only tear down and notify the apprt once.
+        if (self.tmux_viewer == null and self.tmux_router == null) return;
 
         if (self.tmux_viewer) |viewer| {
             viewer.deinit();

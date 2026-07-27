@@ -29,6 +29,10 @@ pub const Parser = struct {
     /// exited and future data dropped).
     max_bytes: usize = 1024 * 1024,
 
+    /// Number of bytes consumed in the current escape skip sequence.
+    /// Reset to 0 each time we enter esc_skip_start.
+    skip_len: usize = 0,
+
     const State = enum {
         /// Outside of any active notifications. This should drop any output
         /// unless it is '%' on the first byte of a line. The buffer will be
@@ -46,6 +50,20 @@ pub const Parser = struct {
 
         /// Inside a begin/end block.
         block,
+
+        /// Skipping a raw escape sequence tmux interleaved into the control
+        /// stream. tmux forwards some sequences (e.g. title changes, OSC 7)
+        /// raw to capable client terminals instead of wrapping them in
+        /// %output. We consume and discard them, then return to idle.
+        /// esc_skip_start: right after ESC, deciding the sequence type.
+        esc_skip_start,
+
+        /// Inside a string sequence (ESC ] k P X ^ _): consume until BEL
+        /// or ST (ESC \).
+        esc_skip_string,
+
+        /// Saw ESC inside a string sequence; if next byte is '\' it is ST.
+        esc_skip_string_esc,
     };
 
     pub fn deinit(self: *Parser) void {
@@ -68,7 +86,16 @@ pub const Parser = struct {
         // we're in a broken state then we'd have already deinited the buffer.
         if (self.state == .broken) return null;
 
-        if (self.buffer.written().len >= self.max_bytes) {
+        // In escape-skip states we track length via skip_len rather than the
+        // buffer (which we don't write to while skipping).
+        const over_limit = switch (self.state) {
+            .esc_skip_start,
+            .esc_skip_string,
+            .esc_skip_string_esc,
+            => self.skip_len >= self.max_bytes,
+            else => self.buffer.written().len >= self.max_bytes,
+        };
+        if (over_limit) {
             self.broken();
             return error.OutOfMemory;
         }
@@ -81,12 +108,24 @@ pub const Parser = struct {
             // we're in a broken state. Control mode output should always
             // be wrapped in '%begin/%end' orelse we expect a notification.
             // Return an exit notification.
-            .idle => if (byte != '%') {
-                self.broken();
-                return .{ .exit = {} };
-            } else {
-                self.buffer.clearRetainingCapacity();
-                self.state = .notification;
+            //
+            // Exception: a raw ESC byte indicates tmux is forwarding an
+            // interleaved escape sequence (e.g. title change, OSC 7) from
+            // the shell. We skip over it rather than treating it as broken.
+            .idle => switch (byte) {
+                0x1B => {
+                    self.state = .esc_skip_start;
+                    self.skip_len = 0;
+                    return null;
+                },
+                '%' => {
+                    self.buffer.clearRetainingCapacity();
+                    self.state = .notification;
+                },
+                else => {
+                    self.broken();
+                    return .{ .exit = {} };
+                },
             },
 
             // If we're in a notification and its not a newline then
@@ -136,6 +175,53 @@ pub const Parser = struct {
                 }
 
                 // Didn't end the block, continue accumulating.
+            },
+
+            // Right after ESC: decide what kind of sequence this is.
+            .esc_skip_start => {
+                self.skip_len += 1;
+                switch (byte) {
+                    // Intermediate bytes (space through /): stay in start,
+                    // keep looking for the final byte.
+                    0x20...0x2F => {},
+                    // String sequences: consume until BEL or ST (ESC \).
+                    ']', 'k', 'P', 'X', '^', '_' => self.state = .esc_skip_string,
+                    // Anything else is the final byte of a simple sequence;
+                    // return to idle.
+                    else => {
+                        log.debug("skipped raw escape sequence in control stream len={}", .{self.skip_len + 1});
+                        self.state = .idle;
+                    },
+                }
+                return null;
+            },
+
+            // Inside a string escape sequence: consume until BEL or ST.
+            .esc_skip_string => {
+                self.skip_len += 1;
+                switch (byte) {
+                    0x07 => {
+                        log.debug("skipped raw escape sequence in control stream len={}", .{self.skip_len + 1});
+                        self.state = .idle;
+                    },
+                    0x1B => self.state = .esc_skip_string_esc,
+                    else => {},
+                }
+                return null;
+            },
+
+            // Saw ESC inside a string sequence; check if next byte is '\' (ST).
+            .esc_skip_string_esc => {
+                self.skip_len += 1;
+                switch (byte) {
+                    '\\' => {
+                        log.debug("skipped raw escape sequence in control stream len={}", .{self.skip_len + 1});
+                        self.state = .idle;
+                    },
+                    // A literal ESC inside the string: keep consuming.
+                    else => self.state = .esc_skip_string,
+                }
+                return null;
             },
         }
 
@@ -198,7 +284,13 @@ pub const Parser = struct {
 
         // The notification MUST exist because we guard entering the notification
         // state on seeing at least a '%'.
-        if (std.mem.eql(u8, cmd, "%begin")) {
+        if (std.mem.eql(u8, cmd, "%exit")) {
+            // tmux is exiting control mode. The reason string (if any) is
+            // ignored; we just signal exit to the caller.
+            self.buffer.clearRetainingCapacity();
+            self.state = .idle;
+            return .{ .exit = {} };
+        } else if (std.mem.eql(u8, cmd, "%begin")) {
             // We don't use the rest of the tokens for now because tmux
             // claims to guarantee that begin/end are always in order and
             // never intermixed. In the future, we should probably validate
@@ -836,4 +928,115 @@ test "tmux client-session-changed" {
     try testing.expectEqualStrings("/dev/pts/1", n.client_session_changed.client);
     try testing.expectEqual(2, n.client_session_changed.session_id);
     try testing.expectEqualStrings("mysession", n.client_session_changed.name);
+}
+
+test "idle skips interleaved title escape sequence" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+
+    // %output before the interleaved sequence
+    var notifs: usize = 0;
+    for ("%output %1 hi\n") |byte| if (try c.put(byte)) |n| {
+        try testing.expect(n == .output);
+        notifs += 1;
+    };
+    // Interleaved raw title escape sequence: ESC k zsh ST
+    for ("\x1bkzsh\x1b\\") |byte| try testing.expect((try c.put(byte)) == null);
+    // %output after the interleaved sequence
+    for ("%output %1 bye\n") |byte| if (try c.put(byte)) |n| {
+        try testing.expect(n == .output);
+        notifs += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), notifs);
+}
+
+test "idle skips OSC7 terminated by BEL" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+
+    // OSC7 terminated by BEL: ESC ] 7 ; file://host/tmp BEL
+    for ("\x1b]7;file://host/tmp\x07") |byte| try testing.expect((try c.put(byte)) == null);
+    // After the interleaved sequence, normal output should still work
+    var notifs: usize = 0;
+    for ("%output %1 ok\n") |byte| if (try c.put(byte)) |n| {
+        try testing.expect(n == .output);
+        notifs += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), notifs);
+}
+
+test "idle skips OSC7 terminated by ST" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+
+    // OSC7 terminated by ST: ESC ] 7 ; file://host/tmp ESC \
+    for ("\x1b]7;file://host/tmp\x1b\\") |byte| try testing.expect((try c.put(byte)) == null);
+    // After the interleaved sequence, normal output should still work
+    var notifs: usize = 0;
+    for ("%output %1 ok\n") |byte| if (try c.put(byte)) |n| {
+        try testing.expect(n == .output);
+        notifs += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), notifs);
+}
+
+test "idle skips two-byte escape" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+
+    // Simple two-byte ESC sequence: ESC =  (DECKPAM)
+    for ("\x1b=") |byte| try testing.expect((try c.put(byte)) == null);
+    // Normal output should still work after the skip
+    var notifs: usize = 0;
+    for ("%output %1 ok\n") |byte| if (try c.put(byte)) |n| {
+        try testing.expect(n == .output);
+        notifs += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), notifs);
+}
+
+test "escape skip overflow becomes broken" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Use a tiny max_bytes so overflow is easy to trigger
+    var c: Parser = .{ .buffer = .init(alloc), .max_bytes = 32 };
+    defer c.deinit();
+
+    // Start an escape skip sequence
+    try testing.expect((try c.put(0x1B)) == null);
+    try testing.expect((try c.put('k')) == null);
+
+    // Feed enough bytes to overflow max_bytes
+    var got_exit = false;
+    for (0..64) |_| {
+        const result = c.put('a') catch |err| {
+            try testing.expect(err == error.OutOfMemory);
+            got_exit = true;
+            break;
+        };
+        if (result) |n| {
+            if (n == .exit) {
+                got_exit = true;
+                break;
+            }
+        }
+        if (c.state == .broken) {
+            got_exit = true;
+            break;
+        }
+    }
+    try testing.expect(got_exit);
 }

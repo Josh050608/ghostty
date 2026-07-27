@@ -473,9 +473,30 @@ pub fn Stream(comptime H: type) type {
             else => Handler,
         };
 
+        /// Comptime capability flag: handlers that expose a tmuxControlActive
+        /// method get byte-level takeover while control mode is active. Bytes
+        /// bypass the VT parser and go straight to dcs_put so that tmux's
+        /// interleaved raw escape sequences cannot reach the parser's
+        /// anywhere-ESC transition (which would unhook the DCS and kill
+        /// the session). All other handlers compile this out at zero cost.
+        const tmux_takeover_capable = @hasDecl(T, "tmuxControlActive");
+
         handler: Handler,
         parser: Parser,
         utf8decoder: UTF8Decoder,
+
+        /// True while tmux control mode owns the byte stream. While
+        /// set, bytes bypass the VT parser and go straight to the DCS
+        /// put path: tmux interleaves raw escape sequences into the
+        /// control stream, and the parser's anywhere-ESC transition
+        /// would otherwise unhook the DCS and kill the session. The
+        /// flag drops when the handler reports control mode ended
+        /// (%exit); the trailing ST then unhooks the parser normally.
+        ///
+        /// The `void` form compiles out entirely for handlers without
+        /// tmuxControlActive, producing zero overhead.
+        tmux_takeover: if (tmux_takeover_capable) bool else void =
+            if (tmux_takeover_capable) false else {},
 
         /// Initialize an allocation-free stream. This will preallocate various
         /// sizes as necessary and anything over that will be dropped. If you
@@ -512,10 +533,29 @@ pub fn Stream(comptime H: type) type {
 
         /// Process a string of characters.
         pub inline fn nextSlice(self: *Self, input: []const u8) void {
+            // While tmux control mode owns the stream, bypass the VT parser
+            // and feed bytes directly to the DCS put path. We peel off the
+            // takeover bytes here so the SIMD path below never sees them
+            // (it would run consumeUntilGround which routes through the
+            // VT state machine, hitting the anywhere-ESC transition).
+            //
+            // The parser stays in dcs_passthrough during takeover, so the
+            // ground fast path in nextSliceCapped is never reachable anyway;
+            // this guard just avoids paying for consumeUntilGround.
+            var rest = input;
+            if (comptime tmux_takeover_capable) {
+                while (self.tmux_takeover and rest.len > 0) {
+                    self.handler.vt(.dcs_put, rest[0]);
+                    if (!self.handler.tmuxControlActive()) self.tmux_takeover = false;
+                    rest = rest[1..];
+                }
+                if (rest.len == 0) return;
+            }
+
             // Disable SIMD optimizations if build requests it or if our
             // manual debug mode is on.
             if (comptime debug or !build_options.simd) {
-                for (input) |c| self.next(c);
+                for (rest) |c| self.next(c);
                 return;
             }
 
@@ -527,10 +567,10 @@ pub fn Stream(comptime H: type) type {
             // Split the input into chunks that fit into cp_buf.
             var i: usize = 0;
             while (true) {
-                const len = @min(cp_buf.len, input.len - i);
-                self.nextSliceCapped(input[i .. i + len], &cp_buf);
+                const len = @min(cp_buf.len, rest.len - i);
+                self.nextSliceCapped(rest[i .. i + len], &cp_buf);
                 i += len;
-                if (i >= input.len) break;
+                if (i >= rest.len) break;
             }
         }
 
@@ -848,6 +888,18 @@ pub fn Stream(comptime H: type) type {
         /// operation that can't use SIMD. Prefer nextSlice if you can and
         /// try to get multiple bytes at once.
         pub inline fn next(self: *Self, c: u8) void {
+            // While tmux control mode owns the stream, bypass the VT parser
+            // entirely and feed each byte directly to the DCS put path.
+            // The parser remains in dcs_passthrough so the ground fast path
+            // below is unreachable; we check takeover first.
+            if (comptime tmux_takeover_capable) {
+                if (self.tmux_takeover) {
+                    self.handler.vt(.dcs_put, c);
+                    if (!self.handler.tmuxControlActive()) self.tmux_takeover = false;
+                    return;
+                }
+            }
+
             // The scalar path can be responsible for decoding UTF-8.
             if (self.parser.state == .ground) {
                 self.nextUtf8(c);
@@ -1020,7 +1072,14 @@ pub fn Stream(comptime H: type) type {
                     .csi_dispatch => |csi_action| self.csiDispatch(csi_action),
                     .esc_dispatch => |esc| self.escDispatch(esc),
                     .osc_dispatch => |cmd| self.oscDispatch(cmd),
-                    .dcs_hook => |dcs| self.handler.vt(.dcs_hook, dcs),
+                    .dcs_hook => |dcs| {
+                        self.handler.vt(.dcs_hook, dcs);
+                        // After hooking, check if the handler entered tmux
+                        // control mode and enable byte-level takeover if so.
+                        if (comptime tmux_takeover_capable) {
+                            self.tmux_takeover = self.handler.tmuxControlActive();
+                        }
+                    },
                     .dcs_put => |code| self.handler.vt(.dcs_put, code),
                     .dcs_unhook => self.handler.vt(.dcs_unhook, {}),
                     .apc_start => self.handler.vt(.apc_start, {}),
@@ -3979,4 +4038,105 @@ test "stream: apc vector boundaries match scalar path" {
             bulk.handler.buf[0..bulk.handler.len],
         );
     };
+}
+
+test "tmux control mode survives interleaved raw escape sequences" {
+    if (comptime !build_options.tmux_control_mode) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const dcs = @import("dcs.zig");
+
+    const H = struct {
+        alloc: std.mem.Allocator,
+        dcs_handler: dcs.Handler = .{},
+        active: bool = false,
+        outputs: usize = 0,
+        exits: usize = 0,
+        printed: std.ArrayListUnmanaged(u21) = .empty,
+
+        pub fn tmuxControlActive(self: *@This()) bool {
+            return self.active;
+        }
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            switch (action) {
+                .dcs_hook => {
+                    var cmd = self.dcs_handler.hook(self.alloc, value) orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .dcs_put => {
+                    var cmd = self.dcs_handler.put(value) orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .dcs_unhook => {
+                    var cmd = self.dcs_handler.unhook() orelse return;
+                    defer cmd.deinit();
+                    self.handleTmuxCmd(cmd);
+                },
+                .print => self.printed.append(self.alloc, value.cp) catch {},
+                .print_slice => for (value.cps) |cp| {
+                    self.printed.append(self.alloc, @intCast(cp)) catch {};
+                },
+                else => {},
+            }
+        }
+
+        fn handleTmuxCmd(self: *@This(), cmd: dcs.Command) void {
+            switch (cmd) {
+                .tmux => |notif| switch (notif) {
+                    .enter => self.active = true,
+                    .exit => {
+                        // Idempotent: %exit and the trailing DCS unhook
+                        // both produce .exit; only count the first one.
+                        if (!self.active) return;
+                        self.active = false;
+                        self.exits += 1;
+                    },
+                    .output => self.outputs += 1,
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    var h: H = .{ .alloc = alloc };
+    defer {
+        h.dcs_handler.deinit();
+        h.printed.deinit(alloc);
+    }
+    var s: Stream(*H) = .init(&h);
+
+    // DCS enter control mode: ESC P 1000 p
+    s.nextSlice("\x1bP1000p");
+    try testing.expect(h.active);
+
+    // Startup block
+    s.nextSlice("%begin 1 0 0\n%end 1 0 0\n");
+    // Interleaved raw title sequence: must NOT kill control mode
+    s.nextSlice("\x1bkzsh\x1b\\");
+    try testing.expect(h.active);
+    s.nextSlice("%output %0 hi\n");
+    // Interleaved OSC7 terminated by BEL
+    s.nextSlice("\x1b]7;file://host/tmp\x07");
+    s.nextSlice("%output %0 bye\n");
+    try testing.expectEqual(@as(usize, 2), h.outputs);
+    try testing.expect(h.active);
+
+    // True exit via %exit
+    s.nextSlice("%exit\n");
+    try testing.expect(!h.active);
+    try testing.expectEqual(@as(usize, 1), h.exits);
+
+    // Trailing ST cleans up DCS state; must NOT fire a second exit event
+    s.nextSlice("\x1b\\");
+    // Normal terminal parsing resumes
+    s.nextSlice("A");
+    try testing.expectEqual(@as(usize, 1), h.exits);
+    try testing.expect(h.printed.items.len == 1 and h.printed.items[0] == 'A');
 }
