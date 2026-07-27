@@ -348,6 +348,11 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// Tmux control mode state changes. See apprt.surface.TmuxEvent
+    /// for the semantics; payload memory is only valid during the
+    /// action callback and must be copied by the apprt.
+    tmux: Tmux,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -416,6 +421,7 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        tmux,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -457,8 +463,8 @@ pub const Action = union(Key) {
         // At the time of writing, we don't promise ABI compatibility
         // so we can change this but I want to be aware of it.
         assert(@sizeOf(CValue) == switch (@sizeOf(usize)) {
-            4 => 16,
-            8 => 24,
+            4 => 20,
+            8 => 40,
             else => unreachable,
         });
     }
@@ -831,6 +837,107 @@ pub const KeyTable = union(enum) {
                 .tag = .deactivate_all,
                 .value = undefined,
             },
+        };
+    }
+};
+
+pub const Tmux = union(enum) {
+    attach: Attach,
+    windows: Windows,
+    exit,
+
+    // Sync with: ghostty_action_tmux_attach_s
+    pub const Attach = extern struct {
+        /// Opaque TmuxRouter pointer; pass back verbatim in the
+        /// surface config of each pane surface.
+        router: ?*anyopaque,
+    };
+
+    // Sync with: ghostty_action_tmux_node_s
+    pub const Node = extern struct {
+        kind: Kind,
+        pane_id: usize,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        children_start: usize,
+        children_len: usize,
+
+        // Sync with: ghostty_action_tmux_node_kind_e
+        pub const Kind = enum(c_int) {
+            pane,
+            horizontal,
+            vertical,
+
+            test "ghostty.h Tmux.Node.Kind" {
+                try lib.checkGhosttyHEnum(
+                    Kind,
+                    "GHOSTTY_ACTION_TMUX_NODE_KIND_",
+                );
+            }
+        };
+    };
+
+    // Sync with: ghostty_action_tmux_window_s
+    pub const CWindow = extern struct {
+        id: usize,
+        name: [*:0]const u8,
+        width: usize,
+        height: usize,
+        root: usize,
+    };
+
+    pub const Windows = struct {
+        windows: []const CWindow,
+        nodes: []const Node,
+
+        // Sync with: ghostty_action_tmux_windows_s
+        pub const C = extern struct {
+            windows: ?[*]const CWindow,
+            windows_len: usize,
+            nodes: ?[*]const Node,
+            nodes_len: usize,
+        };
+
+        pub fn cval(self: Windows) Windows.C {
+            return .{
+                .windows = if (self.windows.len > 0) self.windows.ptr else null,
+                .windows_len = self.windows.len,
+                .nodes = if (self.nodes.len > 0) self.nodes.ptr else null,
+                .nodes_len = self.nodes.len,
+            };
+        }
+    };
+
+    // Sync with: ghostty_action_tmux_tag_e
+    pub const Tag = enum(c_int) {
+        attach,
+        windows,
+        exit,
+
+        test "ghostty.h Tmux.Tag" {
+            try lib.checkGhosttyHEnum(Tag, "GHOSTTY_TMUX_");
+        }
+    };
+
+    // Sync with: ghostty_action_tmux_u
+    pub const CValue = extern union {
+        attach: Attach,
+        windows: Windows.C,
+    };
+
+    // Sync with: ghostty_action_tmux_s
+    pub const C = extern struct {
+        tag: Tag,
+        value: CValue,
+    };
+
+    pub fn cval(self: Tmux) C {
+        return switch (self) {
+            .attach => |v| .{ .tag = .attach, .value = .{ .attach = v } },
+            .windows => |v| .{ .tag = .windows, .value = .{ .windows = v.cval() } },
+            .exit => .{ .tag = .exit, .value = undefined },
         };
     }
 };

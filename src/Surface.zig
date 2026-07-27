@@ -1175,8 +1175,67 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             );
         },
 
-        // Task 9 forwards this to the apprt.
-        .tmux => |ev| ev.deinit(),
+        .tmux => |ev| {
+            defer ev.deinit();
+            switch (ev.event) {
+                .attach => |v| _ = try self.rt_app.performAction(
+                    .{ .surface = self },
+                    .tmux,
+                    .{ .attach = .{ .router = v.router } },
+                ),
+
+                .exit => _ = try self.rt_app.performAction(
+                    .{ .surface = self },
+                    .tmux,
+                    .exit,
+                ),
+
+                .windows => |w| {
+                    const Tmux = apprt.action.Tmux;
+                    const c_windows = try self.alloc.alloc(
+                        Tmux.CWindow,
+                        w.windows.len,
+                    );
+                    defer self.alloc.free(c_windows);
+                    for (w.windows, c_windows) |src, *dst| dst.* = .{
+                        .id = src.id,
+                        .name = src.name.ptr,
+                        .width = src.width,
+                        .height = src.height,
+                        .root = src.root,
+                    };
+
+                    const c_nodes = try self.alloc.alloc(
+                        Tmux.Node,
+                        w.nodes.len,
+                    );
+                    defer self.alloc.free(c_nodes);
+                    for (w.nodes, c_nodes) |src, *dst| dst.* = .{
+                        .kind = switch (src.kind) {
+                            .pane => .pane,
+                            .horizontal => .horizontal,
+                            .vertical => .vertical,
+                        },
+                        .pane_id = src.pane_id,
+                        .x = src.x,
+                        .y = src.y,
+                        .width = src.width,
+                        .height = src.height,
+                        .children_start = src.children_start,
+                        .children_len = src.children_len,
+                    };
+
+                    _ = try self.rt_app.performAction(
+                        .{ .surface = self },
+                        .tmux,
+                        .{ .windows = .{
+                            .windows = c_windows,
+                            .nodes = c_nodes,
+                        } },
+                    );
+                },
+            }
+        },
     }
 }
 

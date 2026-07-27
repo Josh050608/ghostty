@@ -674,6 +674,8 @@ extension Ghostty {
                 return showChildExited(app, target: target, v: action.action.child_exited)
             case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
                 return copyTitleToClipboard(app, target: target)
+            case GHOSTTY_ACTION_TMUX:
+                tmux(app, target: target, v: action.action.tmux)
             default:
                 Ghostty.logger.warning("unknown action action=\(action.tag.rawValue, privacy: .public)")
                 return false
@@ -2238,6 +2240,33 @@ extension Ghostty {
                     assertionFailure()
                 }
             }
+
+        private static func tmux(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_tmux_s)
+        {
+            // Plan 1: log only. Plan 2 replaces this with the
+            // TmuxSessionController pipeline.
+            switch v.tag {
+            case GHOSTTY_TMUX_ATTACH:
+                Ghostty.logger.info("tmux: attach")
+            case GHOSTTY_TMUX_WINDOWS:
+                let w = v.value.windows
+                Ghostty.logger.info("tmux: windows count=\(w.windows_len) nodes=\(w.nodes_len)")
+                if let windows = w.windows {
+                    for i in 0..<Int(w.windows_len) {
+                        let win = windows[i]
+                        let name = String(cString: win.name)
+                        Ghostty.logger.info("tmux: window id=\(win.id) name=\(name, privacy: .public) \(win.width)x\(win.height)")
+                    }
+                }
+            case GHOSTTY_TMUX_EXIT:
+                Ghostty.logger.info("tmux: exit")
+            default:
+                Ghostty.logger.warning("tmux: unknown tag=\(v.tag.rawValue)")
+            }
+        }
 
         private static func colorChange(
             _ app: ghostty_app_t,
