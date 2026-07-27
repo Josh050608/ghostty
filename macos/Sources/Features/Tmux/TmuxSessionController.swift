@@ -177,6 +177,24 @@ final class TmuxSessionController {
         ghostty_tmux_router_command(router, cmd)
     }
 
+    // MARK: - Resize deduplication
+
+    private var lastResize: (cols: Int, rows: Int)? = nil
+
+    /// Send refresh-client -C, deduplicating repeats: every tab shares
+    /// the same client size, so tab switches and duplicate resize events
+    /// would otherwise spam tmux.
+    func sendResize(cols: Int, rows: Int) {
+        guard !isTearingDown, cols > 1, rows > 1 else { return }
+        if let last = lastResize, last == (cols, rows) { return }
+        lastResize = (cols, rows)
+        send(ghostty_tmux_command_s(
+            tag: GHOSTTY_TMUX_COMMAND_RESIZE,
+            id: 0,
+            width: UInt(cols),
+            height: UInt(rows)))
+    }
+
     private func releaseRouter() {
         guard let router else { return }
         ghostty_tmux_router_release(router)

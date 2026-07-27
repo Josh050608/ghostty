@@ -8,6 +8,7 @@ class TmuxTerminalController: TerminalController {
     private(set) weak var session: TmuxSessionController?
     private(set) var tmuxWindowId: UInt = 0
     private var forceClosing = false
+    private var pendingResize: DispatchWorkItem?
 
     convenience init(
         _ ghostty: Ghostty.App,
@@ -52,6 +53,11 @@ class TmuxTerminalController: TerminalController {
             moveFocusTo: keepFocus,
             moveFocusFrom: focusedSurface,
             undoAction: nil)
+
+        // After each layout update (including the first), align the tmux
+        // client size with the current native window bounds so the grid
+        // stays in sync even before the user resizes the window.
+        scheduleTmuxResize()
     }
 
     /// Close this window bypassing tmux command mapping and confirmations
@@ -212,6 +218,41 @@ class TmuxTerminalController: TerminalController {
             id: UInt(paneId),
             width: 0,
             height: 0))
+    }
+
+    // MARK: - Native window resize → tmux client size
+
+    /// Called by the window delegate machinery (Base already calls super chain).
+    override func windowDidResize(_ notification: Notification) {
+        super.windowDidResize(notification)
+        scheduleTmuxResize()
+    }
+
+    private func scheduleTmuxResize() {
+        pendingResize?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.sendTmuxResize() }
+        pendingResize = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+    }
+
+    /// Translate the content-view pixel bounds to a tmux client grid.
+    /// Cell metrics come from any live pane surface (font is uniform across
+    /// all panes); tmux drives per-pane dimensions via the layout it sends back.
+    private func sendTmuxResize() {
+        guard !forceClosing,
+              let session, !session.isTearingDown,
+              let window,
+              let contentView = window.contentView,
+              let anyPane = surfaceTree.first(where: { $0.surface != nil }),
+              let surface = anyPane.surface
+        else { return }
+
+        let size = ghostty_surface_size(surface)
+        guard size.cell_width_px > 0, size.cell_height_px > 0 else { return }
+        let scale = window.backingScaleFactor
+        let cols = Int((contentView.bounds.width * scale) / CGFloat(size.cell_width_px))
+        let rows = Int((contentView.bounds.height * scale) / CGFloat(size.cell_height_px))
+        session.sendResize(cols: cols, rows: rows)
     }
 
     // MARK: - Signature helpers
