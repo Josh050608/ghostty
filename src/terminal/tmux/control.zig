@@ -328,7 +328,13 @@ pub const Parser = struct {
                 line[@intCast(starts[1])..@intCast(ends[1])],
                 10,
             ) catch unreachable;
-            const data = line[@intCast(starts[2])..@intCast(ends[2])];
+
+            // tmux escapes control bytes and backslash in %output payloads
+            // as \ooo octal (vis(3) VIS_OCTAL); decode in place before
+            // handing the data downstream.
+            const data = unescapeOctal(
+                line[@intCast(starts[2])..@intCast(ends[2])],
+            );
 
             // Important: do not clear buffer here since name points to it
             self.state = .idle;
@@ -587,6 +593,34 @@ pub const Parser = struct {
 /// Possible notification types from tmux control mode. These are documented
 /// in tmux(1). A lot of the simple documentation was copied from that man
 /// page here.
+/// Decode tmux control mode \ooo octal escapes in place, returning the
+/// (possibly shortened) decoded slice. Escapes above \377 or otherwise
+/// malformed sequences are passed through unchanged rather than dropped
+/// so we never lose pane data.
+fn unescapeOctal(buf: []u8) []u8 {
+    var w: usize = 0;
+    var r: usize = 0;
+    while (r < buf.len) {
+        esc: {
+            if (buf[r] != '\\' or r + 4 > buf.len) break :esc;
+            const d0 = buf[r + 1];
+            const d1 = buf[r + 2];
+            const d2 = buf[r + 3];
+            if (d0 < '0' or d0 > '3') break :esc;
+            if (d1 < '0' or d1 > '7') break :esc;
+            if (d2 < '0' or d2 > '7') break :esc;
+            buf[w] = (d0 - '0') * 64 + (d1 - '0') * 8 + (d2 - '0');
+            w += 1;
+            r += 4;
+            continue;
+        }
+        buf[w] = buf[r];
+        w += 1;
+        r += 1;
+    }
+    return buf[0..w];
+}
+
 pub const Notification = union(enum) {
     /// Entering tmux control mode. This isn't an actual event sent by
     /// tmux but is one sent by us to indicate that we have detected that
@@ -814,6 +848,36 @@ test "tmux output" {
     try testing.expect(n == .output);
     try testing.expectEqual(42, n.output.pane_id);
     try testing.expectEqualStrings("foo bar baz", n.output.data);
+}
+
+test "tmux output unescapes octal escapes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    // tmux escapes control bytes and backslash as \ooo (three octal digits):
+    // ESC = \033, CR = \015, backslash = \134.
+    for ("%output %1 a\\033[1mb\\134c\\015") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .output);
+    try testing.expectEqual(1, n.output.pane_id);
+    try testing.expectEqualStrings("a\x1b[1mb\\c\r", n.output.data);
+}
+
+test "tmux output preserves malformed escapes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    // A trailing backslash or non-octal continuation shouldn't panic or
+    // drop data; we pass it through as-is.
+    for ("%output %7 a\\9b\\") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .output);
+    try testing.expectEqual(7, n.output.pane_id);
+    try testing.expectEqualStrings("a\\9b\\", n.output.data);
 }
 
 test "tmux session-changed" {
