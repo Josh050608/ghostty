@@ -773,6 +773,15 @@ pub fn tmuxDrainRouter(self: *Termio) void {
             handler.handleTmuxInput(.{ .send_command = cmd });
         },
     };
+
+    // If handling these events sent messages to our mailbox (e.g. the
+    // pty write for a send-keys command), wake it up now. Without this
+    // the write sits in the mailbox until the next unrelated wakeup,
+    // adding unbounded latency to pane input.
+    if (handler.termio_messaged) {
+        handler.termio_messaged = false;
+        self.mailbox.notify();
+    }
 }
 
 /// ThreadData is the data created and stored in the termio thread
