@@ -1182,6 +1182,13 @@ pub const Viewer = struct {
             // Determine which screen to use based on alternate_on
             const screen_key: ScreenSet.Key = if (data.alternate_on) .alternate else .primary;
 
+            // The history/visible restore switches screens as it writes
+            // and leaves whichever screen was restored last active. Make
+            // the active screen match the pane's actual state, otherwise
+            // a primary-screen pane acts like it is in the alternate
+            // screen (no scrollback, scroll-to-arrows, etc.).
+            _ = try t.switchScreen(screen_key);
+
             // Set cursor position on the appropriate screen (tmux uses 0-based)
             if (t.screens.get(screen_key)) |screen| {
                 cursor: {
