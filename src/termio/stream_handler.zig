@@ -636,6 +636,11 @@ pub const StreamHandler = struct {
                 // Plan 2: GUI will close stale surfaces on windows diff;
                 // for now just log.
                 .pane_gone => |id| log.info("tmux pane gone id={}", .{id}),
+
+                // Task 5 wires this: forward the focus change to the
+                // apprt surface so native focus follows tmux. For now
+                // this is a no-op so the library keeps compiling.
+                .focus => {},
             }
         }
     }

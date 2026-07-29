@@ -549,6 +549,41 @@ pub const Parser = struct {
             self.buffer.clearRetainingCapacity();
             self.state = .idle;
             return .{ .window_pane_changed = .{ .window_id = window_id, .pane_id = pane_id } };
+        } else if (std.mem.eql(u8, cmd, "%session-window-changed")) cmd: {
+            var re = oni.Regex.init(
+                "^%session-window-changed \\$([0-9]+) @([0-9]+)$",
+                .{ .capture_group = true },
+                oni.Encoding.utf8,
+                oni.Syntax.default,
+                null,
+            ) catch |err| {
+                log.warn("regex init failed error={}", .{err});
+                return error.RegexError;
+            };
+            defer re.deinit();
+
+            var region = re.search(line, .{}) catch |err| {
+                log.warn("failed to match notification cmd={s} line=\"{s}\" err={}", .{ cmd, line, err });
+                break :cmd;
+            };
+            defer region.deinit();
+            const starts = region.starts();
+            const ends = region.ends();
+
+            const session_id = std.fmt.parseInt(
+                usize,
+                line[@intCast(starts[1])..@intCast(ends[1])],
+                10,
+            ) catch unreachable;
+            const window_id = std.fmt.parseInt(
+                usize,
+                line[@intCast(starts[2])..@intCast(ends[2])],
+                10,
+            ) catch unreachable;
+
+            self.buffer.clearRetainingCapacity();
+            self.state = .idle;
+            return .{ .session_window_changed = .{ .session_id = session_id, .window_id = window_id } };
         } else if (std.mem.eql(u8, cmd, "%client-detached")) cmd: {
             var re = oni.Regex.init(
                 "^%client-detached (.+)$",
@@ -725,6 +760,12 @@ pub const Notification = union(enum) {
     window_pane_changed: struct {
         window_id: usize,
         pane_id: usize,
+    },
+
+    /// The session's current window changed to window-id.
+    session_window_changed: struct {
+        session_id: usize,
+        window_id: usize,
     },
 
     /// The client has detached.
@@ -1045,6 +1086,30 @@ test "tmux window-pane-changed" {
     try testing.expect(n == .window_pane_changed);
     try testing.expectEqual(42, n.window_pane_changed.window_id);
     try testing.expectEqual(2, n.window_pane_changed.pane_id);
+}
+
+test "tmux session-window-changed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    for ("%session-window-changed $0 @7") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .session_window_changed);
+    try testing.expectEqual(0, n.session_window_changed.session_id);
+    try testing.expectEqual(7, n.session_window_changed.window_id);
+}
+
+test "tmux session-window-changed malformed ignored" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    for ("%session-window-changed garbage") |byte| try testing.expect(try c.put(byte) == null);
+    const n = try c.put('\n');
+    try testing.expect(n == null);
 }
 
 test "tmux client-detached" {

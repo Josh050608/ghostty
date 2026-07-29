@@ -229,6 +229,14 @@ pub const Viewer = struct {
             terminal: *Terminal,
         },
 
+        /// tmux-side focus change: make this window (and pane, when
+        /// non-null) the active one in the GUI. From
+        /// %window-pane-changed / %session-window-changed.
+        focus: struct {
+            window_id: usize,
+            pane_id: ?usize,
+        },
+
         /// A pane surface registered for a pane we don't know about.
         pane_gone: usize,
 
@@ -570,9 +578,27 @@ pub const Viewer = struct {
                 return self.defunct();
             },
 
-            // The active pane changed. We don't care about this because
-            // we handle our own focus.
-            .window_pane_changed => {},
+            // The active pane changed: forward to the GUI as a focus
+            // action so native focus follows tmux.
+            .window_pane_changed => |info| {
+                var arena = self.action_arena.promote(self.alloc);
+                defer self.action_arena = arena.state;
+                actions.append(arena.allocator(), .{
+                    .focus = .{ .window_id = info.window_id, .pane_id = info.pane_id },
+                }) catch return self.defunct();
+            },
+
+            // The session's current window changed: forward window-level
+            // focus (no pane info in this notification, so pane_id is
+            // null — the session id is discarded since we only track a
+            // single session per viewer).
+            .session_window_changed => |info| {
+                var arena = self.action_arena.promote(self.alloc);
+                defer self.action_arena = arena.state;
+                actions.append(arena.allocator(), .{
+                    .focus = .{ .window_id = info.window_id, .pane_id = null },
+                }) catch return self.defunct();
+            },
 
             // We ignore this one. It means a session was created or
             // destroyed. If it was our own session we will get an exit
@@ -2922,6 +2948,63 @@ test "window name parsed and renamed" {
                 }
             }).check,
         },
+    });
+}
+
+test "focus actions from pane and window change notifications" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "0" } } },
+            .contains_command = "display-message",
+        },
+        .{ .input = .{ .tmux = .{ .block_end = "3.5a" } }, .contains_command = "list-windows" },
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4] bash
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+        },
+        // pane focus change -> focus{window, pane}
+        .{
+            .input = .{ .tmux = .{ .window_pane_changed = .{ .window_id = 0, .pane_id = 4 } } },
+            .check = (struct {
+                fn check(_: *Viewer, actions: []const Viewer.Action) anyerror!void {
+                    for (actions) |a| switch (a) {
+                        .focus => |f| {
+                            try testing.expectEqual(0, f.window_id);
+                            try testing.expectEqual(4, f.pane_id.?);
+                            return;
+                        },
+                        else => {},
+                    };
+                    return error.TestExpectedFocus;
+                }
+            }).check,
+        },
+        // current window change -> focus{window, null}
+        .{
+            .input = .{ .tmux = .{ .session_window_changed = .{ .session_id = 0, .window_id = 0 } } },
+            .check = (struct {
+                fn check(_: *Viewer, actions: []const Viewer.Action) anyerror!void {
+                    for (actions) |a| switch (a) {
+                        .focus => |f| {
+                            try testing.expectEqual(0, f.window_id);
+                            try testing.expectEqual(null, f.pane_id);
+                            return;
+                        },
+                        else => {},
+                    };
+                    return error.TestExpectedFocus;
+                }
+            }).check,
+        },
+        .{ .input = .{ .tmux = .exit }, .contains_tags = &.{.exit} },
     });
 }
 
