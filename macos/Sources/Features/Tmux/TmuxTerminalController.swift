@@ -73,21 +73,22 @@ class TmuxTerminalController: TerminalController {
 
     // MARK: - Close mapping → tmux commands
 
-    /// Confirms closure for surfaces that have running processes (needsConfirmQuit).
-    /// If `surfaces` is empty the `onConfirm` block is executed immediately.
-    /// Otherwise a standard close-confirmation alert is shown; `onConfirm` is only
-    /// called if the user chooses to proceed.
+    /// Confirms a destructive tmux close (kill-window / kill-pane).
+    /// tmux panes have no local process, so needsConfirmQuit can never
+    /// detect a running program in them; because a kill is irreversible
+    /// we always confirm unless the caller explicitly opted out.
     private func confirmTmux(
-        surfaces: [Ghostty.SurfaceView],
+        required: Bool,
+        informativeText: String,
         onConfirm: @escaping () -> Void
     ) {
-        guard !surfaces.isEmpty else {
+        guard required else {
             onConfirm()
             return
         }
         confirmClose(
             messageText: "Close Terminal?",
-            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+            informativeText: informativeText
         ) {
             onConfirm()
         }
@@ -100,8 +101,10 @@ class TmuxTerminalController: TerminalController {
             super.closeTab(sender)
             return
         }
-        let needsConfirm = surfaceTree.filter { $0.needsConfirmQuit }
-        confirmTmux(surfaces: needsConfirm) { [weak self] in
+        confirmTmux(
+            required: true,
+            informativeText: "This will kill the tmux window and any processes running in it. Close the window with the red button instead to detach and keep the session alive."
+        ) { [weak self] in
             guard let self, let session = self.session else { return }
             session.send(ghostty_tmux_command_s(
                 tag: GHOSTTY_TMUX_COMMAND_KILL_WINDOW,
@@ -148,10 +151,6 @@ class TmuxTerminalController: TerminalController {
         }
 
         // Non-root: this is a split pane. Find the pane id and kill-pane.
-        // We gather all surface views in the node to check needsConfirmQuit.
-        let surfaces: [Ghostty.SurfaceView] = Array(node)
-        let needsConfirm = withConfirmation ? surfaces.filter { $0.needsConfirmQuit } : []
-
         // We need one representative pane id to send to tmux. Use the leftmost leaf view.
         let leafView = node.leftmostLeaf()
         guard let paneId = session.paneId(of: leafView) else {
@@ -161,7 +160,10 @@ class TmuxTerminalController: TerminalController {
             return
         }
 
-        confirmTmux(surfaces: needsConfirm) { [weak self] in
+        confirmTmux(
+            required: withConfirmation,
+            informativeText: "This will kill the tmux pane and any processes running in it."
+        ) { [weak self] in
             self?.session?.send(ghostty_tmux_command_s(
                 tag: GHOSTTY_TMUX_COMMAND_KILL_PANE,
                 id: UInt(paneId),

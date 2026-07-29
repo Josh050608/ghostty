@@ -89,8 +89,10 @@ final class TmuxSessionController {
 
         // If another live tmux window exists for this session, join its
         // tab group. Prefer the last window in the tab group (matches
-        // newTab "end" position behavior).
-        if let groupWindow = anyLiveWindow(), groupWindow !== window {
+        // newTab "end" position behavior). The new controller is already
+        // in `windows`, so we must exclude our own window or an unlucky
+        // dictionary order makes us pick ourselves and skip grouping.
+        if let groupWindow = anyLiveWindow(excluding: window) {
             if let lastInGroup = groupWindow.tabGroup?.windows.last {
                 lastInGroup.addTabbedWindowSafely(window, ordered: .above)
             } else {
@@ -101,8 +103,8 @@ final class TmuxSessionController {
         controller.showWindow(nil)
     }
 
-    private func anyLiveWindow() -> NSWindow? {
-        windows.values.compactMap(\.window).first
+    private func anyLiveWindow(excluding excluded: NSWindow? = nil) -> NSWindow? {
+        windows.values.compactMap(\.window).first { $0 !== excluded }
     }
 
     /// Drop cached panes that no longer appear in any window's layout.
