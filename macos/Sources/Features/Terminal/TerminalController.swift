@@ -1280,6 +1280,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ghostty.newTab(surface: surface)
     }
 
+    /// Create a new tab in this controller's window. Instance seam so
+    /// subclasses can reroute tab creation (tmux: new-window command).
+    /// Default: the existing local-tab static path.
+    func requestNewTab(withBaseConfig config: Ghostty.SurfaceConfiguration? = nil) {
+        guard let window else { return }
+        _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+    }
+
     @IBAction func closeTab(_ sender: Any?) {
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {

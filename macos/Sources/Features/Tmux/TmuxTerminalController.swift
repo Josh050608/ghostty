@@ -278,6 +278,36 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
         session.sendResize(cols: cols, rows: rows)
     }
 
+    // MARK: - Reverse create (plan 3)
+
+    /// ⌘T / File>New Tab / tab-bar "+" on a tmux tab creates a real tmux
+    /// window. The new native tab materializes from the window-add /
+    /// layout-change resync; focus follows via reverse focus (%session-
+    /// window-changed). No local tab is ever created for a live session.
+    override func requestNewTab(withBaseConfig config: Ghostty.SurfaceConfiguration? = nil) {
+        guard isTmuxManaged, let session else {
+            super.requestNewTab(withBaseConfig: config)
+            return
+        }
+        session.send(.newWindow)
+    }
+
+    /// Split gestures on a tmux pane become split-window commands; the
+    /// new pane materializes from the layout-change resync. Returns nil:
+    /// no local SurfaceView is created.
+    override func newSplit(
+        at oldView: Ghostty.SurfaceView,
+        direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        baseConfig config: Ghostty.SurfaceConfiguration? = nil
+    ) -> Ghostty.SurfaceView? {
+        guard isTmuxManaged, let session else {
+            return super.newSplit(at: oldView, direction: direction, baseConfig: config)
+        }
+        guard let paneId = session.paneId(of: oldView) else { return nil }
+        session.send(.split(paneId: paneId, direction: direction))
+        return nil
+    }
+
     // MARK: - Signature helpers
 
     /// Produces a canonical string signature for the current SplitTree by
