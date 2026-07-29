@@ -12,6 +12,7 @@ extension Ghostty {
         case attach(router: UnsafeMutableRawPointer)
         case windows(TmuxWindows)
         case exit
+        case focus(windowId: UInt, paneId: UInt?)
     }
 
     struct TmuxWindows: Equatable, Sendable {

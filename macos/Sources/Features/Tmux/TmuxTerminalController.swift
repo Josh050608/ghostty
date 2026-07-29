@@ -225,12 +225,15 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
 
         guard !forceClosing,
               let session, !session.isTearingDown,
+              // tmux-driven focus application must not echo back.
+              !session.isApplyingTmuxFocus,
               let view = focusedSurface,
               let paneId = session.paneId(of: view)
         else { return }
 
-        // Fire and forget: tmux state is authoritative and any failure just
-        // leaves tmux's active pane behind ours.
+        // select-pane alone does not switch tmux's current window;
+        // send select-window first so tmux-side focus fully follows.
+        session.send(.selectWindow(windowId: UInt(tmuxWindowId)))
         session.send(.selectPane(paneId: paneId))
     }
 

@@ -22,6 +22,7 @@ pub const TmuxEvent = struct {
     pub const Event = union(enum) {
         attach: struct { router: *anyopaque },
         windows: struct { windows: []const Window, nodes: []const Node },
+        focus: struct { window_id: usize, pane_id: ?usize },
         exit,
     };
 
@@ -66,6 +67,22 @@ pub const TmuxEvent = struct {
             .alloc = gpa,
             .arena_state = arena.state,
             .event = .{ .attach = .{ .router = router } },
+        };
+        return ev;
+    }
+
+    pub fn initFocus(
+        gpa: Allocator,
+        window_id: usize,
+        pane_id: ?usize,
+    ) Allocator.Error!*TmuxEvent {
+        var arena: ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const ev = try arena.allocator().create(TmuxEvent);
+        ev.* = .{
+            .alloc = gpa,
+            .arena_state = arena.state,
+            .event = .{ .focus = .{ .window_id = window_id, .pane_id = pane_id } },
         };
         return ev;
     }

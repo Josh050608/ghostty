@@ -2274,6 +2274,11 @@ extension Ghostty {
                 event = .windows(w)
             case GHOSTTY_TMUX_EXIT:
                 event = .exit
+            case GHOSTTY_TMUX_FOCUS:
+                let f = v.value.focus
+                event = .focus(
+                    windowId: UInt(f.window_id),
+                    paneId: f.has_pane ? UInt(f.pane_id) : nil)
             default:
                 Ghostty.logger.warning("tmux: unknown tag=\(v.tag.rawValue)")
                 return

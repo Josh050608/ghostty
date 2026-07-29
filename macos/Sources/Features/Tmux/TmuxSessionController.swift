@@ -13,6 +13,15 @@ final class TmuxSessionController {
     private(set) var router: UnsafeMutableRawPointer?
     private(set) var isTearingDown = false
 
+    /// True while we are applying a tmux-driven focus change to native
+    /// windows. TmuxTerminalController checks this to avoid echoing the
+    /// focus back as select-window/select-pane (loop suppression).
+    private(set) var isApplyingTmuxFocus = false
+
+    /// Focus notification that arrived before its window materialized
+    /// (e.g. %session-window-changed racing the window-add resync).
+    private var pendingFocusWindowId: UInt?
+
     /// tmux window id -> native tab controller.
     var windows: [UInt: TmuxTerminalController] = [:]
     /// tmux pane id -> its surface view. Panes are create-once: a pane
@@ -58,6 +67,12 @@ final class TmuxSessionController {
         }
 
         prunePanes(keeping: ev)
+
+        // A focus notification may have raced the resync that materialized
+        // its window; apply it now that the window exists.
+        if let pending = pendingFocusWindowId, windows[pending] != nil {
+            applyFocus(windowId: pending, paneId: nil)
+        }
     }
 
     private func addWindow(_ w: Ghostty.TmuxWindow, nodes: [Ghostty.TmuxNode]) {
@@ -124,6 +139,70 @@ final class TmuxSessionController {
         panes = panes.filter { live.contains($0.key) }
     }
 
+    // MARK: - Focus (reverse: tmux -> native)
+
+    /// Apply a tmux-side focus change (from %window-pane-changed /
+    /// %session-window-changed) to the native UI.
+    ///
+    /// Two defenses cover a focus notification that references an id we
+    /// don't (yet, or ever) recognize — Task 4's viewer intentionally does
+    /// not filter unknown ids, because %session-window-changed for a
+    /// ⌘T-created window can arrive before the window-add resync that
+    /// materializes it, and filtering here would silently drop that
+    /// window's initial focus:
+    ///  1. Unknown window id: `windows[windowId]` lookup fails, so we stash
+    ///     the id in `pendingFocusWindowId` instead of touching the UI, and
+    ///     `apply(_:)` retries it once the corresponding window exists.
+    ///  2. Unknown/stale pane id: guarded below by both `panes[paneId]`
+    ///     existing and `controller.surfaceTree.contains(view)` — a pane id
+    ///     tmux still tracks but that isn't part of *this* window's current
+    ///     layout is not focused.
+    func applyFocus(windowId: UInt, paneId: UInt?) {
+        guard !isTearingDown else { return }
+        guard let controller = windows[windowId], let window = controller.window else {
+            pendingFocusWindowId = windowId
+            return
+        }
+        pendingFocusWindowId = nil
+
+        isApplyingTmuxFocus = true
+
+        // Select the native tab without stealing key from another app.
+        if let tabGroup = window.tabGroup, tabGroup.selectedWindow !== window {
+            tabGroup.selectedWindow = window
+        }
+
+        // Focus the pane's surface when we know it and it is actually part
+        // of this window's current split tree (defense #2 above).
+        if let paneId, let view = panes[paneId], controller.surfaceTree.contains(view) {
+            Ghostty.moveFocus(to: view)
+        }
+
+        // `Ghostty.moveFocus` always hops through `DispatchQueue.main.async`
+        // (even with no explicit delay — see SurfaceView.moveFocus), and the
+        // SwiftUI `@FocusedValue` plumbing that ultimately updates
+        // `focusedSurface` (and fires `syncFocusToSurfaceTree`, our echo
+        // suppression checkpoint) settles on that same later run-loop turn,
+        // not synchronously within this call. The same is true of a
+        // tab-group switch: `windowDidBecomeKey` on the newly-selected
+        // window's controller can itself run one turn later. A plain
+        // `defer { isApplyingTmuxFocus = false }` here would clear the flag
+        // *before* either of those observes the tmux-driven change, letting
+        // it slip past the guard in TmuxTerminalController and echo a
+        // spurious select-window/select-pane back to tmux — the exact loop
+        // this flag exists to prevent.
+        //
+        // BaseTerminalController.windowDidBecomeKey relies on this same
+        // one-hop assumption ("Sync on the next runloop so split focus has
+        // settled") to observe settled focus state, so we reuse it: only
+        // clear the flag from within a `DispatchQueue.main.async` enqueued
+        // *after* the focus-changing calls above. Main-queue FIFO ordering
+        // guarantees it runs after their internal `.async` work completes.
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplyingTmuxFocus = false
+        }
+    }
+
     // MARK: - Pane surface factory
 
     /// Get or create the surface view for a tmux pane. Create-once:
@@ -178,6 +257,7 @@ final class TmuxSessionController {
         for (_, controller) in windows { controller.tmuxForceClose() }
         windows.removeAll()
         panes.removeAll()
+        pendingFocusWindowId = nil
         releaseRouter()
         Ghostty.logger.info("tmux session ended")
     }

@@ -789,6 +789,7 @@ typedef enum {
   GHOSTTY_TMUX_ATTACH,
   GHOSTTY_TMUX_WINDOWS,
   GHOSTTY_TMUX_EXIT,
+  GHOSTTY_TMUX_FOCUS,
 } ghostty_action_tmux_tag_e;
 
 // apprt.action.Tmux.Attach
@@ -832,10 +833,18 @@ typedef struct {
   uintptr_t nodes_len;
 } ghostty_action_tmux_windows_s;
 
+// apprt.action.Tmux.Focus
+typedef struct {
+  uintptr_t window_id;
+  uintptr_t pane_id;
+  bool has_pane;
+} ghostty_action_tmux_focus_s;
+
 // apprt.action.Tmux.CValue
 typedef union {
   ghostty_action_tmux_attach_s attach;
   ghostty_action_tmux_windows_s windows;
+  ghostty_action_tmux_focus_s focus;
 } ghostty_action_tmux_u;
 
 // apprt.action.Tmux.C

@@ -1205,6 +1205,16 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                     .exit,
                 ),
 
+                .focus => |f| _ = try self.rt_app.performAction(
+                    .{ .surface = self },
+                    .tmux,
+                    .{ .focus = .{
+                        .window_id = f.window_id,
+                        .pane_id = f.pane_id orelse 0,
+                        .has_pane = f.pane_id != null,
+                    } },
+                ),
+
                 .windows => |w| {
                     const Tmux = apprt.action.Tmux;
                     const c_windows = try self.alloc.alloc(

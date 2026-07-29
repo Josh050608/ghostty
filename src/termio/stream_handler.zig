@@ -637,10 +637,17 @@ pub const StreamHandler = struct {
                 // for now just log.
                 .pane_gone => |id| log.info("tmux pane gone id={}", .{id}),
 
-                // Task 5 wires this: forward the focus change to the
-                // apprt surface so native focus follows tmux. For now
-                // this is a no-op so the library keeps compiling.
-                .focus => {},
+                .focus => |f| {
+                    const ev = apprt.surface.TmuxEvent.initFocus(
+                        self.alloc,
+                        f.window_id,
+                        f.pane_id,
+                    ) catch |err| {
+                        log.warn("tmux focus event dropped err={}", .{err});
+                        continue;
+                    };
+                    self.surfaceMessageWriter(.{ .tmux = ev });
+                },
             }
         }
     }

@@ -52,6 +52,9 @@ final class TmuxSessionManager {
         case .windows(let windows):
             sessions[key]?.apply(windows)
 
+        case .focus(let windowId, let paneId):
+            sessions[key]?.applyFocus(windowId: windowId, paneId: paneId)
+
         case .exit:
             sessions[key]?.teardown()
             sessions[key] = nil

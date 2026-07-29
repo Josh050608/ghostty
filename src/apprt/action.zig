@@ -845,6 +845,7 @@ pub const Tmux = union(enum) {
     attach: Attach,
     windows: Windows,
     exit,
+    focus: Focus,
 
     // Sync with: ghostty_action_tmux_attach_s
     pub const Attach = extern struct {
@@ -910,11 +911,19 @@ pub const Tmux = union(enum) {
         }
     };
 
+    // Sync with: ghostty_action_tmux_focus_s
+    pub const Focus = extern struct {
+        window_id: usize,
+        pane_id: usize,
+        has_pane: bool,
+    };
+
     // Sync with: ghostty_action_tmux_tag_e
     pub const Tag = enum(c_int) {
         attach,
         windows,
         exit,
+        focus,
 
         test "ghostty.h Tmux.Tag" {
             try lib.checkGhosttyHEnum(Tag, "GHOSTTY_TMUX_");
@@ -925,6 +934,7 @@ pub const Tmux = union(enum) {
     pub const CValue = extern union {
         attach: Attach,
         windows: Windows.C,
+        focus: Focus,
     };
 
     // Sync with: ghostty_action_tmux_s
@@ -938,6 +948,7 @@ pub const Tmux = union(enum) {
             .attach => |v| .{ .tag = .attach, .value = .{ .attach = v } },
             .windows => |v| .{ .tag = .windows, .value = .{ .windows = v.cval() } },
             .exit => .{ .tag = .exit, .value = undefined },
+            .focus => |v| .{ .tag = .focus, .value = .{ .focus = v } },
         };
     }
 };
