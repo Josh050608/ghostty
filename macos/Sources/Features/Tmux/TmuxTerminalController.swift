@@ -106,11 +106,7 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
             informativeText: "This will kill the tmux window and any processes running in it. Close the window with the red button instead to detach and keep the session alive."
         ) { [weak self] in
             guard let self, let session = self.session else { return }
-            session.send(ghostty_tmux_command_s(
-                tag: GHOSTTY_TMUX_COMMAND_KILL_WINDOW,
-                id: UInt(self.tmuxWindowId),
-                width: 0,
-                height: 0))
+            session.send(.killWindow(windowId: UInt(self.tmuxWindowId)))
         }
     }
 
@@ -122,11 +118,7 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
             super.closeWindow(sender)
             return
         }
-        session.send(ghostty_tmux_command_s(
-            tag: GHOSTTY_TMUX_COMMAND_DETACH,
-            id: 0,
-            width: 0,
-            height: 0))
+        session.send(.detach)
     }
 
     /// Split pane close → kill-pane.
@@ -164,11 +156,7 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
             required: withConfirmation,
             informativeText: "This will kill the tmux pane and any processes running in it."
         ) { [weak self] in
-            self?.session?.send(ghostty_tmux_command_s(
-                tag: GHOSTTY_TMUX_COMMAND_KILL_PANE,
-                id: UInt(paneId),
-                width: 0,
-                height: 0))
+            self?.session?.send(.killPane(paneId: paneId))
         }
     }
 
@@ -243,11 +231,7 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
 
         // Fire and forget: tmux state is authoritative and any failure just
         // leaves tmux's active pane behind ours.
-        session.send(ghostty_tmux_command_s(
-            tag: GHOSTTY_TMUX_COMMAND_SELECT_PANE,
-            id: UInt(paneId),
-            width: 0,
-            height: 0))
+        session.send(.selectPane(paneId: paneId))
     }
 
     // MARK: - Native window resize → tmux client size

@@ -182,9 +182,9 @@ final class TmuxSessionController {
         Ghostty.logger.info("tmux session ended")
     }
 
-    func send(_ cmd: ghostty_tmux_command_s) {
+    func send(_ cmd: TmuxCommand) {
         guard let router else { return }
-        ghostty_tmux_router_command(router, cmd)
+        cmd.withCValue { ghostty_tmux_router_command(router, $0) }
     }
 
     // MARK: - Resize deduplication
@@ -198,11 +198,7 @@ final class TmuxSessionController {
         guard !isTearingDown, cols > 1, rows > 1 else { return }
         if let last = lastResize, last == (cols, rows) { return }
         lastResize = (cols, rows)
-        send(ghostty_tmux_command_s(
-            tag: GHOSTTY_TMUX_COMMAND_RESIZE,
-            id: 0,
-            width: UInt(cols),
-            height: UInt(rows)))
+        send(.resize(cols: UInt(cols), rows: UInt(rows)))
     }
 
     private func releaseRouter() {
