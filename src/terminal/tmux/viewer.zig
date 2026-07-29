@@ -562,6 +562,14 @@ pub const Viewer = struct {
                 return self.defunct();
             },
 
+            // A window was closed or unlinked. Like window_add we refresh
+            // the full window list; a killed non-current window emits no
+            // layout-change, so this is our only removal signal.
+            .window_close => |info| self.windowAdd(info.id) catch {
+                log.warn("failed to handle window close, becoming defunct", .{});
+                return self.defunct();
+            },
+
             // The active pane changed. We don't care about this because
             // we handle our own focus.
             .window_pane_changed => {},
@@ -2319,6 +2327,61 @@ test "window_add queues list_windows when queue empty" {
                     try testing.expectEqual(1, v.command_queue.len());
                 }
             }).check,
+        },
+        .{
+            .input = .{ .tmux = .exit },
+            .contains_tags = &.{.exit},
+        },
+    });
+}
+
+test "window_close queues list_windows resync" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        // Initial startup
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        // Receive version response, which triggers list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // Receive initial window layout with one pane
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 83 44 b7dd,83x44,0,0,0 main
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+        },
+        // Complete all capture-pane commands for pane 0
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // Queue should now be empty
+        .{
+            .input = .{ .tmux = .{ .block_end = "" } },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expect(v.command_queue.empty());
+                }
+            }).check,
+        },
+        // A non-current window was killed: only %window-close arrives
+        // (no layout-change). We must resync via list-windows.
+        .{
+            .input = .{ .tmux = .{ .window_close = .{ .id = 0 } } },
+            .contains_command = "list-windows",
         },
         .{
             .input = .{ .tmux = .exit },

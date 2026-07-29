@@ -417,9 +417,11 @@ pub const Parser = struct {
                 .visible_layout = visible_layout,
                 .raw_flags = raw_flags,
             } };
-        } else if (std.mem.eql(u8, cmd, "%window-add")) cmd: {
+        } else if (std.mem.eql(u8, cmd, "%window-add") or
+            std.mem.eql(u8, cmd, "%unlinked-window-add"))
+        cmd: {
             var re = oni.Regex.init(
-                "^%window-add @([0-9]+)$",
+                "^%(?:unlinked-)?window-add @([0-9]+)$",
                 .{ .capture_group = true },
                 oni.Encoding.utf8,
                 oni.Syntax.default,
@@ -447,9 +449,43 @@ pub const Parser = struct {
             self.buffer.clearRetainingCapacity();
             self.state = .idle;
             return .{ .window_add = .{ .id = id } };
-        } else if (std.mem.eql(u8, cmd, "%window-renamed")) cmd: {
+        } else if (std.mem.eql(u8, cmd, "%window-close") or
+            std.mem.eql(u8, cmd, "%unlinked-window-close"))
+        cmd: {
             var re = oni.Regex.init(
-                "^%window-renamed @([0-9]+) (.+)$",
+                "^%(?:unlinked-)?window-close @([0-9]+)$",
+                .{ .capture_group = true },
+                oni.Encoding.utf8,
+                oni.Syntax.default,
+                null,
+            ) catch |err| {
+                log.warn("regex init failed error={}", .{err});
+                return error.RegexError;
+            };
+            defer re.deinit();
+
+            var region = re.search(line, .{}) catch |err| {
+                log.warn("failed to match notification cmd={s} line=\"{s}\" err={}", .{ cmd, line, err });
+                break :cmd;
+            };
+            defer region.deinit();
+            const starts = region.starts();
+            const ends = region.ends();
+
+            const id = std.fmt.parseInt(
+                usize,
+                line[@intCast(starts[1])..@intCast(ends[1])],
+                10,
+            ) catch unreachable;
+
+            self.buffer.clearRetainingCapacity();
+            self.state = .idle;
+            return .{ .window_close = .{ .id = id } };
+        } else if (std.mem.eql(u8, cmd, "%window-renamed") or
+            std.mem.eql(u8, cmd, "%unlinked-window-renamed"))
+        cmd: {
+            var re = oni.Regex.init(
+                "^%(?:unlinked-)?window-renamed @([0-9]+) (.+)$",
                 .{ .capture_group = true },
                 oni.Encoding.utf8,
                 oni.Syntax.default,
@@ -668,6 +704,13 @@ pub const Notification = union(enum) {
 
     /// The window with ID window-id was linked to the current session.
     window_add: struct {
+        id: usize,
+    },
+
+    /// The window with ID window-id was closed (or unlinked from the
+    /// session). Without handling this, killing a non-current window
+    /// never reaches the viewer: tmux emits no layout-change for it.
+    window_close: struct {
         id: usize,
     },
 
@@ -953,6 +996,42 @@ test "tmux window-renamed" {
     try testing.expect(n == .window_renamed);
     try testing.expectEqual(42, n.window_renamed.id);
     try testing.expectEqualStrings("bar", n.window_renamed.name);
+}
+
+test "tmux window-close" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    for ("%window-close @7") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .window_close);
+    try testing.expectEqual(7, n.window_close.id);
+}
+
+test "tmux unlinked-window-close" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    for ("%unlinked-window-close @3") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .window_close);
+    try testing.expectEqual(3, n.window_close.id);
+}
+
+test "tmux unlinked-window-add" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Parser = .{ .buffer = .init(alloc) };
+    defer c.deinit();
+    for ("%unlinked-window-add @9") |byte| try testing.expect(try c.put(byte) == null);
+    const n = (try c.put('\n')).?;
+    try testing.expect(n == .window_add);
+    try testing.expectEqual(9, n.window_add.id);
 }
 
 test "tmux window-pane-changed" {
