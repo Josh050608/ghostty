@@ -2106,7 +2106,7 @@ pub const CAPI = struct {
         cmd: apprt.action.TmuxCommand,
     ) void {
         const router: *termio.TmuxRouter = @ptrCast(@alignCast(router_ptr));
-        var buf: [128]u8 = undefined;
+        var buf: [512]u8 = undefined;
         const str = termio.TmuxRouter.formatCommand(&buf, cmd) catch |err| {
             log.warn("tmux command format failed err={}", .{err});
             return;

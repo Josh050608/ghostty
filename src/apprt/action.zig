@@ -947,11 +947,16 @@ pub const Tmux = union(enum) {
 /// (TmuxRouter.formatCommand) so the C ABI stays typed.
 pub const TmuxCommand = extern struct {
     tag: Tag,
-    /// Pane id for kill_pane/select_pane; window id for kill_window.
+    /// Pane id for kill_pane/select_pane/split_*; window id for
+    /// kill_window/rename_window/select_window.
     id: usize = 0,
-    /// Client grid size for resize.
+    /// Client grid size for resize. For split_* a non-zero width means
+    /// insert before (-b).
     width: usize = 0,
     height: usize = 0,
+    /// Window name for rename_window; null for everything else. Only
+    /// borrowed for the duration of the call (formatted immediately).
+    text: ?[*:0]const u8 = null,
 
     pub const Tag = enum(c_int) {
         kill_pane,
@@ -959,6 +964,11 @@ pub const TmuxCommand = extern struct {
         detach,
         select_pane,
         resize,
+        new_window,
+        split_horizontal,
+        split_vertical,
+        rename_window,
+        select_window,
 
         // Sync with: ghostty_tmux_command_tag_e
         test "ghostty.h TmuxCommand.Tag" {

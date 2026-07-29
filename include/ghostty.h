@@ -851,6 +851,11 @@ typedef enum {
   GHOSTTY_TMUX_COMMAND_DETACH,
   GHOSTTY_TMUX_COMMAND_SELECT_PANE,
   GHOSTTY_TMUX_COMMAND_RESIZE,
+  GHOSTTY_TMUX_COMMAND_NEW_WINDOW,
+  GHOSTTY_TMUX_COMMAND_SPLIT_HORIZONTAL,
+  GHOSTTY_TMUX_COMMAND_SPLIT_VERTICAL,
+  GHOSTTY_TMUX_COMMAND_RENAME_WINDOW,
+  GHOSTTY_TMUX_COMMAND_SELECT_WINDOW,
 } ghostty_tmux_command_tag_e;
 
 // apprt.action.TmuxCommand
@@ -859,6 +864,7 @@ typedef struct {
   uintptr_t id;
   uintptr_t width;
   uintptr_t height;
+  const char* text;
 } ghostty_tmux_command_s;
 
 // apprt.action.ColorKind

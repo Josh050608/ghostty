@@ -114,7 +114,43 @@ pub fn formatCommand(
         .detach => std.fmt.bufPrint(buf, "detach-client\n", .{}),
         .select_pane => std.fmt.bufPrint(buf, "select-pane -t %{d}\n", .{cmd.id}),
         .resize => std.fmt.bufPrint(buf, "refresh-client -C {d}x{d}\n", .{ cmd.width, cmd.height }),
+        .new_window => std.fmt.bufPrint(buf, "new-window\n", .{}),
+        .split_horizontal => if (cmd.width != 0)
+            std.fmt.bufPrint(buf, "split-window -h -b -t %{d}\n", .{cmd.id})
+        else
+            std.fmt.bufPrint(buf, "split-window -h -t %{d}\n", .{cmd.id}),
+        .split_vertical => if (cmd.width != 0)
+            std.fmt.bufPrint(buf, "split-window -v -b -t %{d}\n", .{cmd.id})
+        else
+            std.fmt.bufPrint(buf, "split-window -v -t %{d}\n", .{cmd.id}),
+        .select_window => std.fmt.bufPrint(buf, "select-window -t @{d}\n", .{cmd.id}),
+        .rename_window => renameWindow(buf, cmd.id, cmd.text),
     };
+}
+
+/// Render rename-window with the name escaped for a tmux double-quoted
+/// argument. Newlines/CR are stripped entirely (a newline terminates the
+/// control-mode command — leaving one in would let a tab title inject a
+/// second command); backslash and double-quote are backslash-escaped.
+fn renameWindow(
+    buf: []u8,
+    id: usize,
+    text: ?[*:0]const u8,
+) std.fmt.BufPrintError![]u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.print("rename-window -t @{d} \"", .{id}) catch return error.NoSpaceLeft;
+    if (text) |t| {
+        for (std.mem.span(t)) |b| switch (b) {
+            '\n', '\r' => {},
+            '\\', '"' => {
+                w.writeByte('\\') catch return error.NoSpaceLeft;
+                w.writeByte(b) catch return error.NoSpaceLeft;
+            },
+            else => w.writeByte(b) catch return error.NoSpaceLeft,
+        };
+    }
+    w.writeAll("\"\n") catch return error.NoSpaceLeft;
+    return w.buffered();
 }
 
 pub fn register(
@@ -313,5 +349,56 @@ test "formatCommand renders each tag" {
     try std.testing.expectEqualStrings(
         "refresh-client -C 120x40\n",
         try TmuxRouter.formatCommand(&buf, .{ .tag = .resize, .width = 120, .height = 40 }),
+    );
+}
+
+test "formatCommand renders plan3 tags" {
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "new-window\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .new_window }),
+    );
+    try std.testing.expectEqualStrings(
+        "split-window -h -t %7\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .split_horizontal, .id = 7 }),
+    );
+    try std.testing.expectEqualStrings(
+        "split-window -h -b -t %7\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .split_horizontal, .id = 7, .width = 1 }),
+    );
+    try std.testing.expectEqualStrings(
+        "split-window -v -t %2\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .split_vertical, .id = 2 }),
+    );
+    try std.testing.expectEqualStrings(
+        "split-window -v -b -t %2\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .split_vertical, .id = 2, .width = 1 }),
+    );
+    try std.testing.expectEqualStrings(
+        "select-window -t @3\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .select_window, .id = 3 }),
+    );
+    try std.testing.expectEqualStrings(
+        "rename-window -t @3 \"dev\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 3, .text = "dev" }),
+    );
+}
+
+test "formatCommand rename escapes injection vectors" {
+    var buf: [512]u8 = undefined;
+    // 反斜杠与双引号转义
+    try std.testing.expectEqualStrings(
+        "rename-window -t @1 \"a\\\\b\\\"c\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1, .text = "a\\b\"c" }),
+    );
+    // 换行/回车剥除(控制模式里换行=命令分隔符,这是注入边界)
+    try std.testing.expectEqualStrings(
+        "rename-window -t @1 \"ab\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1, .text = "a\nb\r" }),
+    );
+    // null text 渲染为空名
+    try std.testing.expectEqualStrings(
+        "rename-window -t @1 \"\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1 }),
     );
 }
