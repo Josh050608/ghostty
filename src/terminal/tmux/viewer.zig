@@ -2627,6 +2627,81 @@ test "two pane flow with pane state" {
     });
 }
 
+test "pane state restores active screen from alternate_on" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        // Initial block_end from attach
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // Session changed notification
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 0,
+                .name = "0",
+            } } },
+            .contains_command = "display-message",
+        },
+        // Receive version response, which triggers list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // list-windows output with 2 panes in a vertical split
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 165 79 ca97,165x79,0,0[165x40,0,0,0,165x38,0,41,4] bash
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+        },
+        // capture-pane pane 0: primary history, primary visible,
+        // alternate history, alternate visible. The alternate screen is
+        // always restored last, so restore leaves it active regardless
+        // of the pane's actual state.
+        .{ .input = .{ .tmux = .{ .block_end = "prompt %" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "prompt %" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // capture-pane pane 4, same order
+        .{ .input = .{ .tmux = .{ .block_end = "prompt %" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "prompt %" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "vim" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "vim" } } },
+        // list-panes: pane 0 is on the primary screen (alternate_on=0),
+        // pane 4 is in a fullscreen TUI (alternate_on=1). Each pane's
+        // active screen must match, otherwise a primary-screen pane
+        // acts like the alternate screen (no scrollback, arrow keys).
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\%0;42;0;1;;;;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;0;;;0;39;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
+                \\%4;10;5;1;;;;1;0;0;0;1;0;0;0;0;0;0;0;0;0;;;0;37;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
+                ,
+            } },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    {
+                        const pane: *Viewer.Pane = v.panes.getEntry(0).?.value_ptr;
+                        const t: *Terminal = &pane.state.loading.terminal;
+                        try testing.expectEqual(.primary, t.screens.active_key);
+                    }
+                    {
+                        const pane: *Viewer.Pane = v.panes.getEntry(4).?.value_ptr;
+                        const t: *Terminal = &pane.state.loading.terminal;
+                        try testing.expectEqual(.alternate, t.screens.active_key);
+                    }
+                }
+            }).check,
+        },
+        .{
+            .input = .{ .tmux = .exit },
+            .contains_tags = &.{.exit},
+        },
+    });
+}
+
 test "pane registered after ready emits pane_take" {
     const alloc = testing.allocator;
     var v: Viewer = try .init(testing.io, alloc);
