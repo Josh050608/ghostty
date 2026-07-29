@@ -131,7 +131,11 @@ pub fn formatCommand(
 /// Render rename-window with the name escaped for a tmux double-quoted
 /// argument. Newlines/CR are stripped entirely (a newline terminates the
 /// control-mode command — leaving one in would let a tab title inject a
-/// second command); backslash and double-quote are backslash-escaped.
+/// second command); backslash, double-quote, `$`, and `~` are
+/// backslash-escaped. `$` and `~` matter because tmux performs variable
+/// expansion and home-directory expansion inside double-quoted strings —
+/// left unescaped, `$SOME_VAR` leaks the shell's environment into the
+/// window name and `~` expands to the user's home directory.
 fn renameWindow(
     buf: []u8,
     id: usize,
@@ -142,7 +146,7 @@ fn renameWindow(
     if (text) |t| {
         for (std.mem.span(t)) |b| switch (b) {
             '\n', '\r' => {},
-            '\\', '"' => {
+            '\\', '"', '$', '~' => {
                 w.writeByte('\\') catch return error.NoSpaceLeft;
                 w.writeByte(b) catch return error.NoSpaceLeft;
             },
@@ -400,5 +404,15 @@ test "formatCommand rename escapes injection vectors" {
     try std.testing.expectEqualStrings(
         "rename-window -t @1 \"\"\n",
         try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1 }),
+    );
+    // $ 转义(未转义时 tmux 会在双引号内做变量展开,泄露环境变量值)
+    try std.testing.expectEqualStrings(
+        "rename-window -t @1 \"before \\$MYREALENV after\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1, .text = "before $MYREALENV after" }),
+    );
+    // ~ 转义(未转义时 tmux 会展开成 HOME 路径)
+    try std.testing.expectEqualStrings(
+        "rename-window -t @1 \"\\~ x\"\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 1, .text = "~ x" }),
     );
 }

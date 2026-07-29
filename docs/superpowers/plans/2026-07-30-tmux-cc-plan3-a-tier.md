@@ -12,7 +12,7 @@
 
 - 仓库:`/Users/zouchaoxu/Desktop/ghostty/ghostty`,分支 `tmux-cc-core`。**禁止创建 issue/PR**(仓库 CLAUDE.md)。
 - Zig 命令一律剥代理:`env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY zig build ...`
-- 基线只增不减:Zig tmux filter 当前 **214/214**;GhosttyTests 全绿;`zig build -Demit-macos-app=false` 0 错。
+- 基线只增不减:`-Dtest-filter=tmux`(小写)**不覆盖** `TmuxRouter`/`TmuxKeyEncode` 等大写驼峰模块名的测试(Zig test filter 大小写敏感,子串匹配的是模块限定名,不含文件路径)——门禁须双跑:`-Dtest-filter=tmux`(当前 **214/214**)与 `-Dtest-filter=Tmux`(大写,覆盖 `TmuxRouter`/`TmuxKeyEncode` 等,当前 **81/81**),两个计数都只增不减;GhosttyTests 全绿;`zig build -Demit-macos-app=false` 0 错。
 - Swift 测试:`xcodebuild test -project macos/Ghostty.xcodeproj -scheme Ghostty -only-testing:GhosttyTests CODE_SIGNING_ALLOWED=NO`(从仓库根跑)。
 - 新增 macOS Swift 源文件必须同时登记到 `macos/Ghostty.xcodeproj/project.pbxproj` 的 **Ghostty-iOS 排除清单**(`membershipExceptions`,现有 `Features/Tmux/*.swift` 条目旁,字母序);`macos/Tests/` 下的测试文件不需要。
 - tmux 版本门槛 ≥3.2(启动时已强制),新代码**不写版本分支**。
