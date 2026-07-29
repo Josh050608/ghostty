@@ -72,6 +72,13 @@ pub const StreamHandler = struct {
     tmux_router: if (tmux_enabled) ?*termio.TmuxRouter else void =
         if (tmux_enabled) null else {},
 
+    /// True when this handler drives a tmux pane surface. A pane is a
+    /// passive mirror of tmux server state: tmux itself is the terminal
+    /// that answers device queries (DA1, DSR, XTVERSION, ...). Any
+    /// handler-originated write here would be routed back through
+    /// send-keys and arrive at the pane program as phantom keystrokes.
+    tmux_passive: bool = false,
+
     /// This is set to true when a message was written to the termio
     /// mailbox. This can be used by callers to determine if they need
     /// to wake up the termio thread.
@@ -135,6 +142,19 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        // Passive tmux panes never talk back to the pty: every write
+        // from this handler is a query response that tmux has already
+        // answered, and sending ours would inject phantom keystrokes
+        // into the pane program.
+        if (comptime tmux_enabled) if (self.tmux_passive) switch (msg) {
+            .write_small, .write_stable => return,
+            .write_alloc => |v| {
+                v.alloc.free(v.data);
+                return;
+            },
+            else => {},
+        };
+
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
@@ -1517,6 +1537,10 @@ pub const StreamHandler = struct {
                 ),
 
                 .query => |kind| report: {
+                    // Passive tmux panes never answer queries (tmux does),
+                    // and their viewer-built terminal has no default
+                    // dynamic colors to report anyway (null unwrap below).
+                    if (comptime tmux_enabled) if (self.tmux_passive) break :report;
                     if (self.osc_color_report_format == .none) break :report;
 
                     const color = switch (kind) {

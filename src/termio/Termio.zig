@@ -288,6 +288,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
         .enquiry_response = opts.config.enquiry_response,
+        .tmux_passive = opts.backend == .tmux_pane,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -622,8 +623,11 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
     const focus_event = self.renderer_state.terminal.modes.get(.focus_event);
     self.renderer_state.mutex.unlock(global.io());
 
-    // If we have focus events enabled, we send the focus event.
-    if (focus_event) {
+    // If we have focus events enabled, we send the focus event. Not
+    // for tmux panes: tmux delivers focus to pane programs itself, and
+    // our report would arrive as phantom input (e.g. vim reading a
+    // bare ESC [ I as the I key).
+    if (focus_event and self.backend != .tmux_pane) {
         var buf: [terminalpkg.focus.max_encode_size]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         terminalpkg.focus.encode(&writer, if (focused) .gained else .lost) catch |err| {
