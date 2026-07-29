@@ -107,6 +107,14 @@ final class TmuxSessionController {
         windows.values.compactMap(\.window).first { $0 !== excluded }
     }
 
+    /// Forget a tab whose window closed without tmux asking for it. Keeping the
+    /// entry would let `anyLiveWindow` anchor the next tab onto a dead window.
+    /// Identity-checked: a controller re-created for the same id must survive.
+    func forget(windowId: UInt, controller: TmuxTerminalController) {
+        guard windows[windowId] === controller else { return }
+        windows[windowId] = nil
+    }
+
     /// Drop cached panes that no longer appear in any window's layout.
     /// Their views were already released by the tree replacements; the
     /// core marks them detached when the surface unregisters.

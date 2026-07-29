@@ -4,7 +4,7 @@ import GhosttyKit
 /// A TerminalController for one tmux window (= one native tab in the
 /// session's dedicated window group). Wraps a pre-built SplitTree of
 /// pane surfaces that were constructed by TmuxSessionController.
-class TmuxTerminalController: TerminalController {
+class TmuxTerminalController: TerminalController, TmuxManagedWindow {
     private(set) weak var session: TmuxSessionController?
     private(set) var tmuxWindowId: UInt = 0
     private var forceClosing = false
@@ -180,6 +180,11 @@ class TmuxTerminalController: TerminalController {
     /// violates the tmux-authoritative invariant. Mapping them to batched
     /// kill-window is deferred; disabled here to preserve correct state.
     /// When torn down or force-closing we defer to super (normal close path).
+    ///
+    /// This only covers the case where the acting tab is a tmux tab. Ordinary
+    /// tabs sharing a group with tmux tabs are handled group-wide by
+    /// ``TmuxTabGuard`` in TerminalController, since the sweep hits every tab
+    /// in the group no matter who started it.
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard !forceClosing, let session, !session.isTearingDown else {
             return super.validateMenuItem(item)
@@ -191,6 +196,25 @@ class TmuxTerminalController: TerminalController {
         default:
             return super.validateMenuItem(item)
         }
+    }
+
+    /// Drop ourselves from the session's window table once our window is gone.
+    /// A stale entry makes `anyLiveWindow` hand a closed window to the next
+    /// `addWindow`, which tabs the new window onto a dead one and drags it back
+    /// on screen as a ghost, splitting the session across two native windows.
+    /// Identity-checked so a re-created controller for the same id is kept.
+    override func windowWillClose(_ notification: Notification) {
+        session?.forget(windowId: tmuxWindowId, controller: self)
+        super.windowWillClose(notification)
+    }
+
+    // MARK: - Tmux ownership
+
+    /// tmux owns this tab until the session tears down or we force-close it;
+    /// both of those paths close the window locally on purpose.
+    var isTmuxManaged: Bool {
+        guard !forceClosing, let session else { return false }
+        return !session.isTearingDown
     }
 
     // MARK: - Focus → select-pane

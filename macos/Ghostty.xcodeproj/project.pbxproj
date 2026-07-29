@@ -185,6 +185,7 @@
 				Features/Tmux/TmuxSessionController.swift,
 				Features/Tmux/TmuxSessionManager.swift,
 				Features/Tmux/TmuxSplitLayout.swift,
+				Features/Tmux/TmuxTabGuard.swift,
 				Features/Tmux/TmuxTerminalController.swift,
 				Features/Terminal/BaseTerminalController.swift,
 				Features/Terminal/ErrorView.swift,
