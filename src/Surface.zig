@@ -1211,7 +1211,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                     .{ .focus = .{
                         .window_id = f.window_id,
                         .pane_id = f.pane_id orelse 0,
-                        .has_pane = f.pane_id != null,
+                        .has_pane = @intFromBool(f.pane_id != null),
                     } },
                 ),
 

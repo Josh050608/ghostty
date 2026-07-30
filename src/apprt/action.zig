@@ -494,6 +494,35 @@ pub const Action = union(Key) {
             .value = value,
         };
     }
+
+    // Action.C is handed to the embedder's action callback **by value**
+    // across a `callconv(.c)` boundary. Every byte of it must survive that
+    // pass unchanged, otherwise payloads silently corrupt on the other side.
+    //
+    // This is not hypothetical: a `bool` field inside any member of an
+    // extern union that the compiler picks as the union's backing layout is
+    // lowered as an `i1`, and the aggregate copy performed for a by-value
+    // C-ABI argument truncates that byte to its low bit. Any other union
+    // member whose data lands on that offset (e.g. a pointer) is silently
+    // mangled. Use fixed-width integers, not `bool`, inside C union members.
+    test "Action.C survives a by-value C ABI pass byte for byte" {
+        const S = struct {
+            var received: [@sizeOf(C)]u8 = undefined;
+            fn callback(v: C) callconv(.c) void {
+                received = std.mem.asBytes(&v)[0..@sizeOf(C)].*;
+            }
+        };
+
+        // Fill every byte with a distinct, non-boolean pattern so that any
+        // byte dropped or truncated by the call lowering is detected.
+        var value: C = undefined;
+        const sent = std.mem.asBytes(&value);
+        for (sent, 0..) |*b, i| b.* = @intCast((i *% 7 +% 0x42) & 0xfe);
+        value.key = .tmux;
+
+        S.callback(value);
+        try std.testing.expectEqualSlices(u8, sent, &S.received);
+    }
 };
 
 // This is made extern (c_int) to make interop easier with our embedded
@@ -915,7 +944,17 @@ pub const Tmux = union(enum) {
     pub const Focus = extern struct {
         window_id: usize,
         pane_id: usize,
-        has_pane: bool,
+
+        /// Boolean, but deliberately NOT `bool`: this field lives inside
+        /// CValue, and CValue is passed by value across the `callconv(.c)`
+        /// action callback as part of Action.C. A `bool` in an extern union
+        /// member is lowered as an `i1`, and the aggregate copy the by-value
+        /// C ABI pass performs truncates that byte to its low bit. That
+        /// silently destroys the low byte of whichever other union member
+        /// overlaps it — here, Windows.C.nodes. Only ever 0 or 1, so the C
+        /// header can keep declaring it `bool` (both are one byte).
+        /// Covered by "Action.C survives a by-value C ABI pass byte for byte".
+        has_pane: u8,
     };
 
     // Sync with: ghostty_action_tmux_tag_e
@@ -950,6 +989,42 @@ pub const Tmux = union(enum) {
             .exit => .{ .tag = .exit, .value = undefined },
             .focus => |v| .{ .tag = .focus, .value = .{ .focus = v } },
         };
+    }
+
+    // The windows payload is two borrowed pointers packed into CValue, and
+    // CValue overlaps Focus. If any Focus field truncates on the by-value
+    // C ABI pass (see the Action.C test above), the nodes pointer loses its
+    // low byte and the embedder reads the node array from the wrong address.
+    test "Tmux windows pointers survive a by-value C ABI pass" {
+        const S = struct {
+            var received: Windows.C = undefined;
+            fn callback(v: Action.C) callconv(.c) void {
+                received = v.value.tmux.value.windows;
+            }
+        };
+
+        // Deliberately picked so the low byte of both pointers is non-zero
+        // (that is the byte Focus.has_pane overlaps) while staying aligned
+        // and representable on 32-bit targets. Never dereferenced.
+        const windows_ptr: [*]const CWindow = @ptrFromInt(0x200000c8);
+        const nodes_ptr: [*]const Node = @ptrFromInt(0x20000140);
+
+        const action: apprt.Action = .{ .tmux = .{ .windows = .{
+            .windows = windows_ptr[0..1],
+            .nodes = nodes_ptr[0..1],
+        } } };
+        S.callback(action.cval());
+
+        try std.testing.expectEqual(
+            @intFromPtr(windows_ptr),
+            @intFromPtr(S.received.windows.?),
+        );
+        try std.testing.expectEqual(
+            @intFromPtr(nodes_ptr),
+            @intFromPtr(S.received.nodes.?),
+        );
+        try std.testing.expectEqual(@as(usize, 1), S.received.windows_len);
+        try std.testing.expectEqual(@as(usize, 1), S.received.nodes_len);
     }
 };
 
