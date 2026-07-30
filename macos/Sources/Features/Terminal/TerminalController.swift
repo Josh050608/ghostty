@@ -729,9 +729,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let tabGroup = window.tabGroup else { return }
         guard tabGroup.windows.count > 1 else { return }
 
-        // This is the keybinding path direct to Immediately, reached without
-        // menu validation in front of it; translate the same way the
-        // @IBAction does.
+        // Defensive duplicate of the mapping the closeOtherTabs @IBAction
+        // already performs: both paths that reach here (that @IBAction,
+        // including the keybinding, and the redo registration below) have
+        // run it, so in practice this returns false. Kept so this entry
+        // point can never bypass the tmux mapping if it gains a caller.
         let candidates = tabGroup.windows
             .filter { $0 != window }
             .compactMap { $0.windowController as? TerminalController }
@@ -789,9 +791,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let tabsToClose = tabGroup.windows.enumerated().filter { $0.offset > currentIndex }
         guard !tabsToClose.isEmpty else { return }
 
-        // This is the keybinding path direct to Immediately, reached without
-        // menu validation in front of it; translate the same way the
-        // @IBAction does.
+        // Defensive duplicate of the mapping the closeTabsOnTheRight
+        // @IBAction already performs: both paths that reach here (that
+        // @IBAction, including the keybinding, and the redo registration
+        // below) have run it, so in practice this returns false. Kept so
+        // this entry point can never bypass the tmux mapping if it gains
+        // a caller.
         let candidates = tabsToClose.compactMap { $0.element.windowController as? TerminalController }
         if TmuxBatchClose.run(candidates, presenting: window) { return }
 
