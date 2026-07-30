@@ -229,13 +229,16 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
               let paneId = session.paneId(of: view)
         else { return }
 
-        // Echo suppression by value, not by timing: if this exact
-        // (window, pane) pair is what tmux itself last told us to focus
-        // (via applyFocus), this firing is that change landing rather than
-        // a genuine user-driven one — swallow it instead of sending it
-        // back to tmux. See TmuxSessionController.lastAppliedFocus for why
-        // this has to be a value comparison rather than a "focus operation
-        // in flight" flag.
+        // Echo suppression by value, not by timing: if this (window, pane)
+        // pair is one that TmuxSessionController.applyFocus is still
+        // expecting to see reflected back from the native UI — either the
+        // literal target it asked for, or a same-window wildcard when
+        // tmux didn't name a pane, or a pre-registered stale value from a
+        // tab switch racing Ghostty.moveFocus — this firing is that change
+        // landing rather than a genuine user-driven one, so it's swallowed
+        // instead of being sent back to tmux. See TmuxFocusEchoFilter's
+        // doc comment for why this has to be a value comparison against a
+        // small set rather than a single "focus operation in flight" flag.
         if session.consumeIfEcho((windowId: tmuxWindowId, paneId: paneId)) { return }
 
         // select-pane alone does not switch tmux's current window;

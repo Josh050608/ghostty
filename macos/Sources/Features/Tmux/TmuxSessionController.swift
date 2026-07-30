@@ -173,38 +173,38 @@ final class TmuxSessionController {
         }
         pendingFocusWindowId = nil
 
-        // Figure out the echo(es) to expect before triggering any of the
-        // (partly asynchronous) focus-changing calls below, so
-        // TmuxTerminalController.syncFocusToSurfaceTree has them available
-        // no matter how many run-loop turns those calls take to land.
-        var expected: [TmuxFocusEchoFilter.Entry] = [
-            .init(windowId: windowId, paneId: paneId),
-        ]
-        // If we're about to move focus to a different pane than the one
-        // currently focused in this window, also expect the stale pane as
-        // an echo: the tabGroup.selectedWindow assignment below can fire
-        // windowDidBecomeKey (and thus a syncFocusToSurfaceTree round)
-        // before Ghostty.moveFocus's async work actually lands the new
-        // pane, so that round reports the *old* pane as "currently
-        // focused" — an artifact of the tab switch, not a real user
-        // action. See TmuxFocusEchoFilter's doc comment.
-        if let paneId,
-           let currentView = controller.focusedSurface,
-           let currentPaneId = self.paneId(of: currentView),
-           currentPaneId != paneId {
-            expected.append(.init(windowId: windowId, paneId: currentPaneId))
+        // Decide what will actually happen before registering any expected
+        // echoes below — mirrors the guards used further down verbatim, so
+        // "will an operation run" and "did an operation run" can never
+        // disagree.
+        let willSwitchTab = window.tabGroup.map { $0.selectedWindow !== window } ?? false
+        let moveFocusTarget: Ghostty.SurfaceView? = paneId.flatMap { pid in
+            guard let view = panes[pid], controller.surfaceTree.contains(view) else { return nil }
+            return view
         }
-        focusEchoFilter.register(expected)
+        let willMoveFocus = moveFocusTarget != nil
+
+        // What to expect is a pure decision given the above — see
+        // TmuxFocusEchoFilter.expectedEntries for why a no-op registers
+        // nothing and the stale-pane entry only applies when a tab switch
+        // is actually about to happen.
+        focusEchoFilter.register(TmuxFocusEchoFilter.expectedEntries(
+            windowId: windowId,
+            paneId: paneId,
+            willSwitchTab: willSwitchTab,
+            willMoveFocus: willMoveFocus,
+            currentPaneId: controller.focusedSurface.flatMap { self.paneId(of: $0) }
+        ))
 
         // Select the native tab without stealing key from another app.
-        if let tabGroup = window.tabGroup, tabGroup.selectedWindow !== window {
+        if willSwitchTab, let tabGroup = window.tabGroup {
             tabGroup.selectedWindow = window
         }
 
         // Focus the pane's surface when we know it and it is actually part
         // of this window's current split tree (defense #2 above).
-        if let paneId, let view = panes[paneId], controller.surfaceTree.contains(view) {
-            Ghostty.moveFocus(to: view)
+        if let moveFocusTarget {
+            Ghostty.moveFocus(to: moveFocusTarget)
         }
     }
 

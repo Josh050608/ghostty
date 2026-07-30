@@ -112,4 +112,56 @@ import Testing
         #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 1)) == false)
         #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 99)) == false)
     }
+
+    // MARK: - expectedEntries (the applyFocus registration decision)
+
+    @Test func noOpApplyFocusRegistersEmptySet() {
+        // Window W is already tmux's selected tab and no pane move
+        // applies (e.g. a %session-window-changed for the window the
+        // native UI already shows) — applyFocus changes nothing, so
+        // nothing should be registered. A stale wildcard/target entry left
+        // over from this would otherwise sit forever and swallow the
+        // user's next, unrelated click in this window.
+        let entries = TmuxFocusEchoFilter.expectedEntries(
+            windowId: 1,
+            paneId: nil,
+            willSwitchTab: false,
+            willMoveFocus: false,
+            currentPaneId: 9)
+        #expect(entries.isEmpty)
+
+        var filter = TmuxFocusEchoFilter()
+        filter.register(entries)
+        // Nothing registered means nothing is ever recognized as an echo,
+        // regardless of what candidate shows up next — including the
+        // window's current pane, a wildcard-shaped nil, or anything else.
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 9)) == false)
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: nil)) == false)
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 3)) == false)
+    }
+
+    @Test func moveFocusOnlyDoesNotRegisterStaleEntry() {
+        // Window W is already the selected tab (no tabGroup.selectedWindow
+        // assignment will happen), but applyFocus is moving focus to a
+        // different pane within it. Since no tab switch occurs, the
+        // windowDidBecomeKey race that the stale-pane entry exists for
+        // cannot happen here — registering pane 1 (the pre-change focus)
+        // anyway would swallow the user's most likely next click, a click
+        // back onto pane 1.
+        let entries = TmuxFocusEchoFilter.expectedEntries(
+            windowId: 7,
+            paneId: 2,
+            willSwitchTab: false,
+            willMoveFocus: true,
+            currentPaneId: 1)
+        #expect(entries == [Entry(windowId: 7, paneId: 2)])
+
+        var filter = TmuxFocusEchoFilter()
+        filter.register(entries)
+        // The stale pane (1) was never registered, so a genuine click back
+        // onto it is sent normally, not swallowed.
+        #expect(filter.consumeIfEcho(Entry(windowId: 7, paneId: 1)) == false)
+        // The actual target (2) is still recognized as the expected echo.
+        #expect(filter.consumeIfEcho(Entry(windowId: 7, paneId: 2)) == true)
+    }
 }

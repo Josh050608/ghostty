@@ -25,16 +25,32 @@
 ///    select-window/select-pane back to tmux. A `paneId == nil` entry is
 ///    therefore a window-level wildcard: it matches any pane in that
 ///    window.
-///  - When `applyFocus(windowId: W, paneId: P2)` asks to move focus to a
-///    *different* pane than the one currently focused in that window
-///    (P1), the tab's own `windowDidBecomeKey` (triggered by the
-///    `tabGroup.selectedWindow` assignment) can fire and call
-///    `syncFocusToSurfaceTree` *before* `Ghostty.moveFocus`'s asynchronous
-///    work has actually landed P2 — so that first sync round reports the
-///    stale P1 as "currently focused". Left unswallowed this sends
-///    select-pane(P1) to tmux, clobbering the very focus tmux just asked
-///    for. `applyFocus` pre-registers `(W, P1)` alongside `(W, P2)` so
-///    this artifact is recognized and consumed instead of forwarded.
+///  - When `applyFocus(windowId: W, paneId: P2)` needs to switch the
+///    native tab to W *and* move focus to a different pane than the one
+///    currently focused there (P1), the tab's own `windowDidBecomeKey`
+///    (triggered by the `tabGroup.selectedWindow` assignment) can fire and
+///    call `syncFocusToSurfaceTree` *before* `Ghostty.moveFocus`'s
+///    asynchronous work has actually landed P2 — so that first sync round
+///    reports the stale P1 as "currently focused". Left unswallowed this
+///    sends select-pane(P1) to tmux, clobbering the very focus tmux just
+///    asked for. `applyFocus` pre-registers `(W, P1)` alongside `(W, P2)`
+///    so this artifact is recognized and consumed instead of forwarded —
+///    but only when a tab switch is actually about to happen, since that
+///    assignment is the only thing that can trigger the premature
+///    `windowDidBecomeKey` round in the first place; registering it
+///    unconditionally would swallow the user's very next, unrelated click
+///    back onto P1 (the single most likely next click).
+///
+/// Symmetrically, an `applyFocus` call that will neither switch tabs nor
+/// move focus — window W is already tmux's selected tab and no pane move
+/// applies — changes nothing in the native UI and therefore can never
+/// produce an echo. Registering an entry for it anyway would leave a dead
+/// wildcard or target sitting in the filter forever (nothing will ever
+/// fire `syncFocusToSurfaceTree` to consume it), ready to swallow the
+/// *next*, unrelated, genuine focus change in that window instead. This is
+/// a common path in practice: clicking a native tab that tmux already
+/// considers current round-trips back here as a no-op `applyFocus`, and
+/// must register nothing at all.
 struct TmuxFocusEchoFilter {
     /// A focus value we expect to see echoed back from the native UI as a
     /// consequence of an `applyFocus` call, plus what should happen when
@@ -44,6 +60,50 @@ struct TmuxFocusEchoFilter {
         /// nil matches any pane in `windowId` (window-level wildcard, for
         /// tmux notifications that didn't specify a pane).
         let paneId: UInt?
+    }
+
+    /// Computes the entries `TmuxSessionController.applyFocus` should
+    /// register for a given focus request, given what it has already
+    /// determined it will actually do to the native UI.
+    ///
+    /// Pure and independent of AppKit/`TmuxSessionController` on purpose:
+    /// this is exactly the decision that was wrong in two ways before —
+    /// registering a target/wildcard entry even when nothing would
+    /// actually happen (leaving a dead entry to swallow a later, unrelated
+    /// echo), and registering the stale-pane entry even when no tab switch
+    /// was about to happen (so the race that entry exists for could never
+    /// occur, and it just sat there ready to swallow the user's next click
+    /// back onto that pane). Keeping it pure lets both fixed behaviors be
+    /// asserted directly, without a real `NSWindow`/`NSTabGroup`.
+    ///
+    /// - Parameters:
+    ///   - willSwitchTab: whether `applyFocus` is about to assign
+    ///     `tabGroup.selectedWindow`. The stale-pane entry only makes sense
+    ///     when this is true, since that assignment is the only thing that
+    ///     can trigger the premature `windowDidBecomeKey` round that
+    ///     observes the stale pane.
+    ///   - willMoveFocus: whether `applyFocus` is about to call
+    ///     `Ghostty.moveFocus`.
+    ///   - currentPaneId: the window's currently focused pane, if any,
+    ///     before this call does anything.
+    static func expectedEntries(
+        windowId: UInt,
+        paneId: UInt?,
+        willSwitchTab: Bool,
+        willMoveFocus: Bool,
+        currentPaneId: UInt?
+    ) -> [Entry] {
+        // Neither operation will run: nothing changes in the native UI, so
+        // nothing will ever fire syncFocusToSurfaceTree to consume an
+        // entry — register none.
+        guard willSwitchTab || willMoveFocus else { return [] }
+
+        var expected: [Entry] = []
+        if willSwitchTab, let paneId, let currentPaneId, currentPaneId != paneId {
+            expected.append(.init(windowId: windowId, paneId: currentPaneId))
+        }
+        expected.append(.init(windowId: windowId, paneId: paneId))
+        return expected
     }
 
     private(set) var pending: [Entry] = []
