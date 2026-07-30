@@ -505,6 +505,13 @@ pub const Action = union(Key) {
     // C-ABI argument truncates that byte to its low bit. Any other union
     // member whose data lands on that offset (e.g. a pointer) is silently
     // mangled. Use fixed-width integers, not `bool`, inside C union members.
+    //
+    // IMPORTANT: this test only has detection power where the backend emits
+    // the truncating aggregate copy — observed on aarch64, NOT on x86_64
+    // (whose lowering produces no `trunc i8 -> i1` for this shape). A CI that
+    // only runs x86_64 will pass it unconditionally, so the comptime check
+    // below ("Action.CValue contains no bool") is the portable guard; keep
+    // both.
     test "Action.C survives a by-value C ABI pass byte for byte" {
         const S = struct {
             var received: [@sizeOf(C)]u8 = undefined;
@@ -522,6 +529,39 @@ pub const Action = union(Key) {
 
         S.callback(value);
         try std.testing.expectEqualSlices(u8, sent, &S.received);
+    }
+
+    // Portable companion to the test above: reject `bool` anywhere inside
+    // Action.CValue at comptime, on every target, so the rule holds even on
+    // backends where the byte loss does not reproduce at runtime. The
+    // ADDING NEW ACTIONS guidance appends new actions to the end of the
+    // union, which is exactly the position that decides the union's backing
+    // layout — a `bool` added there arms the bug for every other member.
+    test "Action.CValue contains no bool" {
+        const S = struct {
+            fn check(comptime T: type, comptime path: []const u8) !void {
+                switch (@typeInfo(T)) {
+                    .bool => {
+                        std.log.err("bool in Action.CValue at {s}", .{path});
+                        return error.BoolInCUnion;
+                    },
+
+                    // Packed containers are a single backing integer, so
+                    // their bools are bits of that integer rather than
+                    // separately lowered fields. Not a hazard; don't recurse.
+                    inline .@"struct", .@"union" => |info| if (info.layout != .@"packed") {
+                        inline for (info.fields) |f| {
+                            try check(f.type, path ++ "." ++ f.name);
+                        }
+                    },
+
+                    .array => |info| try check(info.child, path ++ "[]"),
+                    else => {},
+                }
+            }
+        };
+
+        try S.check(CValue, "CValue");
     }
 };
 
@@ -814,14 +854,20 @@ pub const KeySequence = union(enum) {
 
     // Sync with: ghostty_action_key_sequence_s
     pub const C = extern struct {
-        active: bool,
+        /// Boolean, but deliberately NOT `bool`. See the note on
+        /// Tmux.Focus.has_pane: a `bool` in a member of the extern union
+        /// Action.CValue can be lowered as an `i1`, and the aggregate copy
+        /// the by-value C ABI pass performs then truncates that byte to its
+        /// low bit, silently corrupting whichever other union member overlaps
+        /// it. Only ever 0 or 1, so ghostty.h keeps declaring it `bool`.
+        active: u8,
         trigger: input.Trigger.C,
     };
 
     pub fn cval(self: KeySequence) C {
         return switch (self) {
-            .trigger => |t| .{ .active = true, .trigger = t.cval() },
-            .end => .{ .active = false, .trigger = .{} },
+            .trigger => |t| .{ .active = 1, .trigger = t.cval() },
+            .end => .{ .active = 0, .trigger = .{} },
         };
     }
 };
@@ -1090,7 +1136,14 @@ pub const ReloadConfig = extern struct {
     /// A soft reload means that the configuration doesn't need to be
     /// read off disk, but libghostty needs the full config again so call
     /// updateConfig with it.
-    soft: bool = false,
+    ///
+    /// Boolean, but deliberately NOT `bool`. See the note on
+    /// Tmux.Focus.has_pane: a `bool` in a member of the extern union
+    /// Action.CValue can be lowered as an `i1`, and the aggregate copy the
+    /// by-value C ABI pass performs then truncates that byte to its low bit,
+    /// silently corrupting whichever other union member overlaps it. Only
+    /// ever 0 or 1, so ghostty.h keeps declaring it `bool`.
+    soft: u8 = 0,
 };
 
 pub const ConfigChange = struct {

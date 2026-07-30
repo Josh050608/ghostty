@@ -2469,7 +2469,7 @@ const Action = struct {
         const config: *Config = config: {
             // Soft-reloading applies conditional logic to the existing loaded
             // config so we return that as-is (but take a reference).
-            if (opts.soft) {
+            if (opts.soft != 0) {
                 break :config self.private().config.ref();
             }
 

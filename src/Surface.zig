@@ -1805,7 +1805,7 @@ fn notifyConfigConditionalState(self: *Surface) void {
     _ = self.rt_app.performAction(
         .{ .surface = self },
         .reload_config,
-        .{ .soft = true },
+        .{ .soft = 1 },
     ) catch |err| {
         log.warn("failed to notify app of config state change err={}", .{err});
     };

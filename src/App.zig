@@ -409,7 +409,7 @@ pub fn colorSchemeEvent(
     _ = try rt_app.performAction(
         .app,
         .reload_config,
-        .{ .soft = true },
+        .{ .soft = 1 },
     );
 }
 
