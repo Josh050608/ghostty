@@ -391,11 +391,18 @@ class BaseTerminalController: NSWindowController,
 
             let newTitle = textField.stringValue
             if newTitle.isEmpty {
-                self.titleOverride = nil
+                self.userDidSetTitleOverride(nil)
             } else {
-                self.titleOverride = newTitle
+                self.userDidSetTitleOverride(newTitle)
             }
         }
+    }
+
+    /// User-initiated tab rename commit point. Subclasses can reroute
+    /// (tmux: rename-window command; the title then updates from the
+    /// %window-renamed echo, keeping tmux authoritative).
+    func userDidSetTitleOverride(_ title: String?) {
+        titleOverride = title
     }
 
     /// Close a surface from a view.

@@ -321,6 +321,18 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
         return nil
     }
 
+    // MARK: - Rename → rename-window
+
+    /// GUI rename on a tmux tab becomes rename-window; the native title
+    /// updates when tmux echoes %window-renamed (no optimistic local set).
+    override func userDidSetTitleOverride(_ title: String?) {
+        guard isTmuxManaged, let session else {
+            super.userDidSetTitleOverride(title)
+            return
+        }
+        session.send(.renameWindow(windowId: UInt(tmuxWindowId), name: title ?? ""))
+    }
+
     // MARK: - Signature helpers
 
     /// Produces a canonical string signature for the current SplitTree by
