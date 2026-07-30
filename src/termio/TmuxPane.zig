@@ -140,13 +140,12 @@ test "queueWrite routes through TmuxKeyEncode" {
         events.deinit(alloc);
     }
     try router.drainEvents(&events, alloc);
-    try std.testing.expectEqual(@as(usize, 2), events.items.len);
+    // "hi" is only 2 bytes (< TmuxKeyEncode.MIN_LITERAL_RUN) and borders
+    // the "\r" hex byte, so it folds into one merged hex command rather
+    // than a separate literal + hex pair.
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
     try std.testing.expectEqualStrings(
-        "send-keys -t %5 -l -- \"hi\"\n",
+        "send-keys -t %5 -H 68 69 0d\n",
         events.items[0].command,
-    );
-    try std.testing.expectEqualStrings(
-        "send-keys -t %5 -H 0d\n",
-        events.items[1].command,
     );
 }

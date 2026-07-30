@@ -38,4 +38,9 @@ test {
     @import("std").testing.refAllDecls(@This());
 
     _ = @import("termio/shell_integration.zig");
+
+    // TmuxKeyEncode is only reached today via a non-pub `@import` inside
+    // TmuxPane.zig. Pin it here too so its tests stay in the discovery
+    // graph even if that production wiring is ever refactored away.
+    _ = @import("termio/TmuxKeyEncode.zig");
 }
