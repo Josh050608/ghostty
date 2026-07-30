@@ -5,7 +5,7 @@ import Combine
 import GhosttyKit
 
 /// A classic, tabbed terminal experience.
-class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller {
+class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller, BatchCloseParticipant {
     override var windowNibName: NSNib.Name? {
         let defaultValue = "Terminal"
 
@@ -714,13 +714,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         window.close()
     }
 
+    // MARK: - Batch close → tmux mapping
+
+    /// Default disposition for the batch close actions ("Close Other Tabs",
+    /// "Close Tabs to the Right"): close through the existing local path.
+    /// TmuxTerminalController overrides this to route live tmux tabs to
+    /// kill-window instead (see TmuxBatchClose). Declared directly on the
+    /// class rather than in an extension so the override below is possible —
+    /// members added via an extension are not overridable by subclasses.
+    var batchCloseDisposition: BatchCloseDisposition { .local }
+
     private func closeOtherTabsImmediately() {
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
         guard tabGroup.windows.count > 1 else { return }
-        // Menu validation already refuses this for groups holding tmux tabs;
-        // repeated here because keybindings reach us without validation.
-        guard !TmuxTabGuard.blocksBatchClose(tabGroup.windows) else { return }
+
+        // This is the keybinding path direct to Immediately, reached without
+        // menu validation in front of it; translate the same way the
+        // @IBAction does.
+        let candidates = tabGroup.windows
+            .filter { $0 != window }
+            .compactMap { $0.windowController as? TerminalController }
+        if TmuxBatchClose.run(candidates, presenting: window) { return }
 
         // Start an undo grouping
         if let undoManager {
@@ -769,13 +784,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private func closeTabsOnTheRightImmediately() {
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
-        // Menu validation already refuses this for groups holding tmux tabs;
-        // repeated here because keybindings reach us without validation.
-        guard !TmuxTabGuard.blocksBatchClose(tabGroup.windows) else { return }
         guard let currentIndex = tabGroup.windows.firstIndex(of: window) else { return }
 
         let tabsToClose = tabGroup.windows.enumerated().filter { $0.offset > currentIndex }
         guard !tabsToClose.isEmpty else { return }
+
+        // This is the keybinding path direct to Immediately, reached without
+        // menu validation in front of it; translate the same way the
+        // @IBAction does.
+        let candidates = tabsToClose.compactMap { $0.element.windowController as? TerminalController }
+        if TmuxBatchClose.run(candidates, presenting: window) { return }
 
         undoManager?.beginUndoGrouping()
         defer {
@@ -1315,6 +1333,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // If we only have one window then we have no other tabs to close
         guard tabGroup.windows.count > 1 else { return }
 
+        let candidates = tabGroup.windows
+            .filter { $0 != window }
+            .compactMap { $0.windowController as? TerminalController }
+        if TmuxBatchClose.run(candidates, presenting: window) { return }
+
         // Check if we have to confirm close.
         guard tabGroup.windows.contains(where: { window in
             // Ignore ourself
@@ -1347,6 +1370,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         let tabsToClose = tabGroup.windows.enumerated().filter { $0.offset > currentIndex }
         guard !tabsToClose.isEmpty else { return }
+
+        let candidates = tabsToClose.compactMap { $0.element.windowController as? TerminalController }
+        if TmuxBatchClose.run(candidates, presenting: window) { return }
 
         let needsConfirm = tabsToClose.contains { (_, candidate) in
             guard let controller = candidate.windowController as? TerminalController else {
@@ -1642,16 +1668,8 @@ extension TerminalController {
         switch item.action {
         case #selector(closeTabsOnTheRight):
             guard let window, let tabGroup = window.tabGroup else { return false }
-            guard !TmuxTabGuard.blocksBatchClose(tabGroup.windows) else { return false }
             guard let currentIndex = tabGroup.windows.firstIndex(of: window) else { return false }
             return tabGroup.windows.indices.contains { $0 > currentIndex }
-
-        case #selector(closeOtherTabs):
-            // Ordinary groups keep the inherited behavior; a group holding tmux
-            // tabs disables the action entirely (see TmuxTabGuard).
-            guard let tabGroup = window?.tabGroup else { return super.validateMenuItem(item) }
-            guard !TmuxTabGuard.blocksBatchClose(tabGroup.windows) else { return false }
-            return super.validateMenuItem(item)
 
         case #selector(returnToDefaultSize):
             guard let window else { return false }

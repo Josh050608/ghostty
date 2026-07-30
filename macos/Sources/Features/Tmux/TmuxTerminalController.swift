@@ -4,7 +4,7 @@ import GhosttyKit
 /// A TerminalController for one tmux window (= one native tab in the
 /// session's dedicated window group). Wraps a pre-built SplitTree of
 /// pane surfaces that were constructed by TmuxSessionController.
-class TmuxTerminalController: TerminalController, TmuxManagedWindow {
+class TmuxTerminalController: TerminalController {
     private(set) weak var session: TmuxSessionController?
     private(set) var tmuxWindowId: UInt = 0
     private var forceClosing = false
@@ -160,30 +160,15 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
         }
     }
 
-    // MARK: - Menu validation
+    // MARK: - Batch close → kill-window
 
-    /// Disable "Close Other Tabs" and "Close Tabs on the Right" for live tmux
-    /// sessions. Both actions reach `closeTabImmediately` → `window.close()` on
-    /// OTHER tmux tab windows, locally closing them with no tmux command, which
-    /// violates the tmux-authoritative invariant. Mapping them to batched
-    /// kill-window is deferred; disabled here to preserve correct state.
-    /// When torn down or force-closing we defer to super (normal close path).
-    ///
-    /// This only covers the case where the acting tab is a tmux tab. Ordinary
-    /// tabs sharing a group with tmux tabs are handled group-wide by
-    /// ``TmuxTabGuard`` in TerminalController, since the sweep hits every tab
-    /// in the group no matter who started it.
-    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        guard !forceClosing, let session, !session.isTearingDown else {
-            return super.validateMenuItem(item)
-        }
-        switch item.action {
-        case #selector(closeOtherTabs(_:)),
-             #selector(closeTabsOnTheRight(_:)):
-            return false
-        default:
-            return super.validateMenuItem(item)
-        }
+    /// "Close Other Tabs" / "Close Tabs to the Right" caught this tab: map it
+    /// to a batched kill-window instead of the default local close (see
+    /// TmuxBatchClose). Torn down or force-closing tabs are closed locally on
+    /// purpose, so they report `.local` like an ordinary tab.
+    override var batchCloseDisposition: BatchCloseDisposition {
+        guard isTmuxManaged, let session else { return .local }
+        return .tmuxKill(session: session, windowId: UInt(tmuxWindowId))
     }
 
     /// Drop ourselves from the session's window table once our window is gone.
