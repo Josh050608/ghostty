@@ -46,11 +46,16 @@ enum TmuxBatchClose {
     /// session's window order. Touches nothing but each candidate's declared
     /// disposition — no AppKit, no confirmation, no side effects — so it is
     /// directly unit-testable.
-    static func partition(_ candidates: [any BatchCloseParticipant])
-        -> (local: [any BatchCloseParticipant],
+    ///
+    /// Generic over the candidate type (rather than `[any BatchCloseParticipant]`)
+    /// so the returned `local` bucket keeps its caller's concrete element type:
+    /// `run` gets back `[TerminalController]` with no fallible re-downcast
+    /// needed to call `closeTabImmediately`.
+    static func partition<C: BatchCloseParticipant>(_ candidates: [C])
+        -> (local: [C],
             kills: [(session: any TmuxKillTarget, windowIds: [UInt])])
     {
-        var local: [any BatchCloseParticipant] = []
+        var local: [C] = []
         var killMap: [ObjectIdentifier: (session: any TmuxKillTarget, windowIds: [UInt])] = [:]
         var order: [ObjectIdentifier] = []
 
@@ -110,20 +115,28 @@ enum TmuxBatchClose {
                 }
             }
             for candidate in local {
-                (candidate as? TerminalController)?.closeTabImmediately(registerRedo: false)
+                candidate.closeTabImmediately(registerRedo: false)
             }
         }
 
         if let window {
             alert.beginSheetModal(for: window) { response in
                 guard response == .alertFirstButtonReturn else { return }
+                // This is important so that we avoid losing focus when Stage
+                // Manager is used (#8336)
+                alert.window.orderOut(nil)
                 execute()
             }
         } else {
             // No window to attach a sheet to (e.g. a detached/off-screen
             // caller): fall back to a blocking modal so the confirmation
             // still happens rather than being silently skipped.
-            if alert.runModal() == .alertFirstButtonReturn { execute() }
+            if alert.runModal() == .alertFirstButtonReturn {
+                // This is important so that we avoid losing focus when Stage
+                // Manager is used (#8336)
+                alert.window.orderOut(nil)
+                execute()
+            }
         }
         return true
     }

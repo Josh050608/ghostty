@@ -27,7 +27,7 @@ import Testing
     }
 
     @Test func allLocalReturnsAllInLocalBucket() {
-        let candidates: [any BatchCloseParticipant] = [
+        let candidates: [StubParticipant] = [
             StubParticipant(.local),
             StubParticipant(.local),
         ]
@@ -41,7 +41,7 @@ import Testing
     @Test func killsGroupBySession() {
         let sessionA = FakeSession()
         let sessionB = FakeSession()
-        let candidates: [any BatchCloseParticipant] = [
+        let candidates: [StubParticipant] = [
             StubParticipant(.tmuxKill(session: sessionA, windowId: 1)),
             StubParticipant(.tmuxKill(session: sessionA, windowId: 2)),
             StubParticipant(.tmuxKill(session: sessionB, windowId: 3)),
@@ -57,7 +57,7 @@ import Testing
 
     @Test func mixedPartition() {
         let session = FakeSession()
-        let candidates: [any BatchCloseParticipant] = [
+        let candidates: [StubParticipant] = [
             StubParticipant(.local),
             StubParticipant(.tmuxKill(session: session, windowId: 1)),
             StubParticipant(.tmuxKill(session: session, windowId: 2)),
