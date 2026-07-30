@@ -225,11 +225,18 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
 
         guard !forceClosing,
               let session, !session.isTearingDown,
-              // tmux-driven focus application must not echo back.
-              !session.isApplyingTmuxFocus,
               let view = focusedSurface,
               let paneId = session.paneId(of: view)
         else { return }
+
+        // Echo suppression by value, not by timing: if this exact
+        // (window, pane) pair is what tmux itself last told us to focus
+        // (via applyFocus), this firing is that change landing rather than
+        // a genuine user-driven one — swallow it instead of sending it
+        // back to tmux. See TmuxSessionController.lastAppliedFocus for why
+        // this has to be a value comparison rather than a "focus operation
+        // in flight" flag.
+        if session.consumeIfEcho((windowId: tmuxWindowId, paneId: paneId)) { return }
 
         // select-pane alone does not switch tmux's current window;
         // send select-window first so tmux-side focus fully follows.

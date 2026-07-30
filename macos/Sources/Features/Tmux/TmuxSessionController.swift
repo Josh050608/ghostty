@@ -13,10 +13,22 @@ final class TmuxSessionController {
     private(set) var router: UnsafeMutableRawPointer?
     private(set) var isTearingDown = false
 
-    /// True while we are applying a tmux-driven focus change to native
-    /// windows. TmuxTerminalController checks this to avoid echoing the
-    /// focus back as select-window/select-pane (loop suppression).
-    private(set) var isApplyingTmuxFocus = false
+    /// The last tmux-driven focus we applied to the native UI.
+    /// TmuxTerminalController.syncFocusToSurfaceTree compares against this
+    /// (via consumeIfEcho) to suppress echoing it back as select-window/
+    /// select-pane (loop suppression). This is a value comparison rather
+    /// than a "focus operation in flight" timing flag on purpose: the
+    /// actual native focus change from `Ghostty.moveFocus` (and the
+    /// SwiftUI `@FocusedValue` plumbing that eventually calls
+    /// syncFocusToSurfaceTree) lands an unknown, unbounded number of
+    /// run-loop turns later, so nothing about *when* syncFocusToSurfaceTree
+    /// fires can be relied on to bound a timing window. Comparing values
+    /// instead makes zero assumptions about run-loop hop counts: whenever
+    /// the echo arrives, if it matches what we just told the native UI to
+    /// focus, it is recognized and swallowed; a genuine user-driven focus
+    /// change always lands on a different (window, pane) pair and is never
+    /// mistaken for an echo.
+    private(set) var lastAppliedFocus: (windowId: UInt, paneId: UInt?)?
 
     /// Focus notification that arrived before its window materialized
     /// (e.g. %session-window-changed racing the window-add resync).
@@ -165,7 +177,12 @@ final class TmuxSessionController {
         }
         pendingFocusWindowId = nil
 
-        isApplyingTmuxFocus = true
+        // Record what we're about to apply before triggering any of the
+        // (partly asynchronous) focus-changing calls below, so the echo
+        // suppression checkpoint in TmuxTerminalController.syncFocusToSurfaceTree
+        // has the value available no matter how many run-loop turns those
+        // calls take to actually land.
+        lastAppliedFocus = (windowId, paneId)
 
         // Select the native tab without stealing key from another app.
         if let tabGroup = window.tabGroup, tabGroup.selectedWindow !== window {
@@ -177,30 +194,29 @@ final class TmuxSessionController {
         if let paneId, let view = panes[paneId], controller.surfaceTree.contains(view) {
             Ghostty.moveFocus(to: view)
         }
+    }
 
-        // `Ghostty.moveFocus` always hops through `DispatchQueue.main.async`
-        // (even with no explicit delay — see SurfaceView.moveFocus), and the
-        // SwiftUI `@FocusedValue` plumbing that ultimately updates
-        // `focusedSurface` (and fires `syncFocusToSurfaceTree`, our echo
-        // suppression checkpoint) settles on that same later run-loop turn,
-        // not synchronously within this call. The same is true of a
-        // tab-group switch: `windowDidBecomeKey` on the newly-selected
-        // window's controller can itself run one turn later. A plain
-        // `defer { isApplyingTmuxFocus = false }` here would clear the flag
-        // *before* either of those observes the tmux-driven change, letting
-        // it slip past the guard in TmuxTerminalController and echo a
-        // spurious select-window/select-pane back to tmux — the exact loop
-        // this flag exists to prevent.
-        //
-        // BaseTerminalController.windowDidBecomeKey relies on this same
-        // one-hop assumption ("Sync on the next runloop so split focus has
-        // settled") to observe settled focus state, so we reuse it: only
-        // clear the flag from within a `DispatchQueue.main.async` enqueued
-        // *after* the focus-changing calls above. Main-queue FIFO ordering
-        // guarantees it runs after their internal `.async` work completes.
-        DispatchQueue.main.async { [weak self] in
-            self?.isApplyingTmuxFocus = false
-        }
+    /// Checks whether `candidate` (the (window, pane) pair a
+    /// syncFocusToSurfaceTree call is about to send to tmux) matches the
+    /// last tmux-driven focus we applied and, if so, consumes it (clears
+    /// the record) so only the *first* observed echo of a given focus
+    /// change is suppressed.
+    ///
+    /// Consume-once rather than "keep latest forever": syncFocusToSurfaceTree
+    /// can plausibly fire more than once for a single applyFocus (e.g. a
+    /// tab-group switch's own windowDidBecomeKey resync racing the
+    /// moveFocus-driven update), and consuming on first match means a
+    /// second, independent firing for the *same* pair is treated as a real
+    /// send (harmless — tmux no-ops a reselect of its own already-active
+    /// pane/window) rather than being silently swallowed. Keeping the value
+    /// around indefinitely would instead risk permanently masking a later
+    /// *genuine* user click back onto a pane that happens to match a
+    /// stale recorded value, leaving tmux's active pane out of sync with
+    /// the native UI with no future correction.
+    func consumeIfEcho(_ candidate: (windowId: UInt, paneId: UInt?)) -> Bool {
+        guard let last = lastAppliedFocus, last == candidate else { return false }
+        lastAppliedFocus = nil
+        return true
     }
 
     // MARK: - Pane surface factory
@@ -258,6 +274,7 @@ final class TmuxSessionController {
         windows.removeAll()
         panes.removeAll()
         pendingFocusWindowId = nil
+        lastAppliedFocus = nil
         releaseRouter()
         Ghostty.logger.info("tmux session ended")
     }
