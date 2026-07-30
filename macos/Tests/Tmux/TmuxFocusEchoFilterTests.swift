@@ -1,0 +1,115 @@
+import Testing
+@testable import Ghostty
+
+@Suite struct TmuxFocusEchoFilterTests {
+    typealias Entry = TmuxFocusEchoFilter.Entry
+
+    @Test func exactMatchIsConsumedOnce() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 1, paneId: 5)])
+
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 5)) == true)
+        // Consume-once: the same value fired a second time (no intervening
+        // register) is no longer recognized as an echo.
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 5)) == false)
+    }
+
+    @Test func nilPaneEntryIsAWindowLevelWildcard() {
+        // Mirrors %session-window-changed: tmux names a window but no
+        // pane, yet the native echo always names some concrete pane (the
+        // window's currently focused surface).
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 1, paneId: nil)])
+
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 42)) == true)
+    }
+
+    @Test func doubleEchoOfSameValueFirstSwallowedSecondPassesThrough() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 3, paneId: 9)])
+
+        // First observation of this value: recognized as the expected echo.
+        #expect(filter.consumeIfEcho(Entry(windowId: 3, paneId: 9)) == true)
+        // A second, independent firing of the identical value (e.g. from
+        // windowDidBecomeKey's own resync) is treated as a real send, not
+        // silently swallowed forever.
+        #expect(filter.consumeIfEcho(Entry(windowId: 3, paneId: 9)) == false)
+    }
+
+    @Test func differentWindowNeverFalsePositives() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 1, paneId: 5)])
+
+        // Same pane id, different window: must not match.
+        #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 5)) == false)
+        // The original entry is still pending since nothing consumed it.
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 5)) == true)
+    }
+
+    @Test func nilWildcardDoesNotLeakAcrossWindows() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 1, paneId: nil)])
+
+        #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 1)) == false)
+    }
+
+    @Test func staleTabSwitchArtifactIsSwallowedAlongsideTargetPane() {
+        // Reproduces the cross-tab race: applyFocus(windowId: 7, paneId: 2)
+        // is asked for while the window's native focus is still on pane 1.
+        // Both the stale pane-1 report (from windowDidBecomeKey's early
+        // resync) and the eventual pane-2 settle must be swallowed — if
+        // either leaks through as a real send, either tmux's requested
+        // focus gets clobbered (stale echo unswallowed) or a real user
+        // action nearby could get masked (target unswallowed).
+        var filter = TmuxFocusEchoFilter()
+        filter.register([
+            Entry(windowId: 7, paneId: 2),
+            Entry(windowId: 7, paneId: 1),
+        ])
+
+        // First sync round: windowDidBecomeKey fires before moveFocus
+        // lands, reporting the still-stale pane 1.
+        #expect(filter.consumeIfEcho(Entry(windowId: 7, paneId: 1)) == true)
+        // Second sync round: moveFocus has landed, reporting pane 2.
+        #expect(filter.consumeIfEcho(Entry(windowId: 7, paneId: 2)) == true)
+        // Nothing left pending.
+        #expect(filter.pending.isEmpty)
+    }
+
+    @Test func registerReplacesRatherThanAppends() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([Entry(windowId: 1, paneId: 1)])
+        filter.register([Entry(windowId: 2, paneId: 2)])
+
+        // The first window's entry was dropped, not merged.
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 1)) == false)
+        #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 2)) == true)
+    }
+
+    @Test func forgetDropsOnlyEntriesForThatWindow() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([
+            Entry(windowId: 1, paneId: 1),
+            Entry(windowId: 2, paneId: 2),
+        ])
+
+        filter.forget(windowId: 1)
+
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 1)) == false)
+        #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 2)) == true)
+    }
+
+    @Test func clearDropsEverything() {
+        var filter = TmuxFocusEchoFilter()
+        filter.register([
+            Entry(windowId: 1, paneId: 1),
+            Entry(windowId: 2, paneId: nil),
+        ])
+
+        filter.clear()
+
+        #expect(filter.pending.isEmpty)
+        #expect(filter.consumeIfEcho(Entry(windowId: 1, paneId: 1)) == false)
+        #expect(filter.consumeIfEcho(Entry(windowId: 2, paneId: 99)) == false)
+    }
+}
