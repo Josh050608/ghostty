@@ -13,6 +13,7 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const TmuxKeyEncode = @import("TmuxKeyEncode.zig");
 
 const log = std.log.scoped(.io_tmux_pane);
 
@@ -77,10 +78,6 @@ pub fn resize(
     _ = screen_size;
 }
 
-/// Max bytes per send-keys command. Keeps commands well under any
-/// tmux line-length limits while amortizing command overhead.
-const WRITE_CHUNK = 64;
-
 pub fn queueWrite(
     self: *TmuxPane,
     alloc: Allocator,
@@ -92,19 +89,11 @@ pub fn queueWrite(
     // The terminal-side newline translation happens in tmux's pty,
     // not ours; send bytes as-is.
     _ = linefeed;
+    try TmuxKeyEncode.encode(alloc, self.pane_id, data, self, emitCommand);
+}
 
-    var i: usize = 0;
-    while (i < data.len) {
-        const chunk = data[i..@min(data.len, i + WRITE_CHUNK)];
-        i += chunk.len;
-
-        var buf: std.Io.Writer.Allocating = .init(alloc);
-        defer buf.deinit();
-        try buf.writer.print("send-keys -t %{d} -H", .{self.pane_id});
-        for (chunk) |b| try buf.writer.print(" {x:0>2}", .{b});
-        try buf.writer.writeByte('\n');
-        try self.router.sendCommand(buf.writer.buffered());
-    }
+fn emitCommand(self: *TmuxPane, cmd: []const u8) anyerror!void {
+    try self.router.sendCommand(cmd);
 }
 
 pub fn childExitedAbnormally(
@@ -129,7 +118,7 @@ pub fn getProcessInfo(
     return null;
 }
 
-test "queueWrite encodes send-keys hex chunks" {
+test "queueWrite routes through TmuxKeyEncode" {
     const alloc = std.testing.allocator;
     var wakeup = try xev.Async.init();
     defer wakeup.deinit();
@@ -151,9 +140,13 @@ test "queueWrite encodes send-keys hex chunks" {
         events.deinit(alloc);
     }
     try router.drainEvents(&events, alloc);
-    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expectEqual(@as(usize, 2), events.items.len);
     try std.testing.expectEqualStrings(
-        "send-keys -t %5 -H 68 69 0d\n",
+        "send-keys -t %5 -l -- \"hi\"\n",
         events.items[0].command,
+    );
+    try std.testing.expectEqualStrings(
+        "send-keys -t %5 -H 0d\n",
+        events.items[1].command,
     );
 }
