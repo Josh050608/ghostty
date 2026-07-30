@@ -959,7 +959,7 @@ pub const Tmux = union(enum) {
 pub const TmuxCommand = extern struct {
     tag: Tag,
     /// Pane id for kill_pane/select_pane/split_*; window id for
-    /// kill_window/rename_window/select_window.
+    /// kill_window/rename_window/select_window/automatic_rename.
     id: usize = 0,
     /// Client grid size for resize. For split_* a non-zero width means
     /// insert before (-b).
@@ -980,6 +980,7 @@ pub const TmuxCommand = extern struct {
         split_vertical,
         rename_window,
         select_window,
+        automatic_rename,
 
         // Sync with: ghostty_tmux_command_tag_e
         test "ghostty.h TmuxCommand.Tag" {

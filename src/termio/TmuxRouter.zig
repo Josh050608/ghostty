@@ -125,6 +125,7 @@ pub fn formatCommand(
             std.fmt.bufPrint(buf, "split-window -v -t %{d}\n", .{cmd.id}),
         .select_window => std.fmt.bufPrint(buf, "select-window -t @{d}\n", .{cmd.id}),
         .rename_window => renameWindow(buf, cmd.id, cmd.text),
+        .automatic_rename => std.fmt.bufPrint(buf, "set-window-option -t @{d} automatic-rename on\n", .{cmd.id}),
     };
 }
 
@@ -385,6 +386,18 @@ test "formatCommand renders plan3 tags" {
     try std.testing.expectEqualStrings(
         "rename-window -t @3 \"dev\"\n",
         try TmuxRouter.formatCommand(&buf, .{ .tag = .rename_window, .id = 3, .text = "dev" }),
+    );
+}
+
+// GUI 改名清空为 nil/空串时不能发 rename-window ""(那会把 tmux 的
+// automatic-rename 关掉并把标题卡在空串),而是要显式重新打开
+// automatic-rename,让 tmux 自己生成名字并回声 %window-renamed,标题
+// 经既有回流路径自然恢复。
+test "formatCommand renders automatic_rename" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "set-window-option -t @5 automatic-rename on\n",
+        try TmuxRouter.formatCommand(&buf, .{ .tag = .automatic_rename, .id = 5 }),
     );
 }
 

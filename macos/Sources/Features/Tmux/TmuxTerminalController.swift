@@ -325,12 +325,25 @@ class TmuxTerminalController: TerminalController, TmuxManagedWindow {
 
     /// GUI rename on a tmux tab becomes rename-window; the native title
     /// updates when tmux echoes %window-renamed (no optimistic local set).
+    ///
+    /// A non-empty title maps to rename-window (which, as tmux's standard
+    /// behavior, also turns automatic-rename OFF for that window — expected
+    /// and left alone). nil/empty maps to restoring automatic-rename instead
+    /// of rename-window "": tmux would still turn automatic-rename off and
+    /// echo back an empty name, permanently blanking the tab with no GUI
+    /// path to re-enable it. Restoring automatic-rename instead lets tmux
+    /// regenerate the name itself and echo %window-renamed, so the dialog's
+    /// "leave blank to restore the default" text is actually true.
     override func userDidSetTitleOverride(_ title: String?) {
         guard isTmuxManaged, let session else {
             super.userDidSetTitleOverride(title)
             return
         }
-        session.send(.renameWindow(windowId: UInt(tmuxWindowId), name: title ?? ""))
+        if let title, !title.isEmpty {
+            session.send(.renameWindow(windowId: UInt(tmuxWindowId), name: title))
+        } else {
+            session.send(.restoreAutomaticRename(windowId: UInt(tmuxWindowId)))
+        }
     }
 
     // MARK: - Signature helpers

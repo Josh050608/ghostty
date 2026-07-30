@@ -1654,7 +1654,7 @@ extension Ghostty {
                 guard let window = surfaceView.window,
                       let controller = window.windowController as? BaseTerminalController
                 else { return false }
-                controller.titleOverride = titleOverride
+                controller.userDidSetTitleOverride(titleOverride)
                 return true
 
             default:

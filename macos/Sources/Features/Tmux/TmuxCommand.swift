@@ -14,6 +14,11 @@ enum TmuxCommand: Equatable {
     case split(paneId: UInt, direction: SplitTree<Ghostty.SurfaceView>.NewDirection)
     case renameWindow(windowId: UInt, name: String)
     case selectWindow(windowId: UInt)
+    /// Restores tmux's automatic-rename for the window (turned back on).
+    /// Used when the GUI rename is cleared (nil/empty): sending
+    /// rename-window with an empty name would instead turn
+    /// automatic-rename OFF and leave the title stuck empty.
+    case restoreAutomaticRename(windowId: UInt)
 
     /// Bridge to the C struct. The body runs synchronously; text is only
     /// borrowed for that duration (the ABI entry formats immediately).
@@ -47,6 +52,8 @@ enum TmuxCommand: Equatable {
             }
         case .selectWindow(let id):
             body(.init(tag: GHOSTTY_TMUX_COMMAND_SELECT_WINDOW, id: UInt(id), width: 0, height: 0, text: nil))
+        case .restoreAutomaticRename(let id):
+            body(.init(tag: GHOSTTY_TMUX_COMMAND_AUTOMATIC_RENAME, id: UInt(id), width: 0, height: 0, text: nil))
         }
     }
 }

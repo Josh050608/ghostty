@@ -51,4 +51,11 @@ import GhosttyKit
         #expect(c.tag == GHOSTTY_TMUX_COMMAND_RESIZE)
         #expect(c.width == 120 && c.height == 40)
     }
+
+    @Test func restoreAutomaticRenameFields() {
+        let c = cValue(.restoreAutomaticRename(windowId: 5))
+        #expect(c.tag == GHOSTTY_TMUX_COMMAND_AUTOMATIC_RENAME)
+        #expect(c.id == 5)
+        #expect(c.text == nil)
+    }
 }
