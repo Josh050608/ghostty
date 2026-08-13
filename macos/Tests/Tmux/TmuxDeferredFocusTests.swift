@@ -113,4 +113,18 @@ import Testing
             canMoveFocus: false)
         #expect(pending == Pending(windowId: 5, paneId: 2))
     }
+
+    @Test func pendingSplitFocusSuppressesStaleLayoutRestore() {
+        let pending = Pending(windowId: 7, paneId: 12)
+
+        #expect(!TmuxSessionController.shouldPreserveFocus(
+            pending: pending,
+            updatingWindowId: 7))
+        #expect(TmuxSessionController.shouldPreserveFocus(
+            pending: pending,
+            updatingWindowId: 8))
+        #expect(TmuxSessionController.shouldPreserveFocus(
+            pending: nil,
+            updatingWindowId: 7))
+    }
 }

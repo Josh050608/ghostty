@@ -171,6 +171,11 @@ class AppDelegate: NSObject,
 #endif
         super.init()
 
+        // Install the observer before the first surface starts its command. A
+        // fast `tmux -CC attach-session` may emit attach/windows before
+        // applicationDidFinishLaunching.
+        _ = TmuxSessionManager.shared
+
         ghostty.delegate = self
     }
 
@@ -316,9 +321,6 @@ class AppDelegate: NSObject,
 
         // Setup signal handlers
         setupSignals()
-
-        // Start routing tmux control mode events to session controllers.
-        _ = TmuxSessionManager.shared
 
         switch Ghostty.launchSource {
         case .app:

@@ -24,7 +24,11 @@ class TmuxTerminalController: TerminalController {
     /// Update window state from a new tmux windows event.
     /// Rebuilds the split tree when the layout signature changes; SurfaceViews
     /// are reused by pane id (via session.makeTree) so content never flashes.
-    func tmuxUpdate(window w: Ghostty.TmuxWindow, nodes: [Ghostty.TmuxNode]) {
+    func tmuxUpdate(
+        window w: Ghostty.TmuxWindow,
+        nodes: [Ghostty.TmuxNode],
+        preserveFocus: Bool = true
+    ) {
         if titleOverride != w.name { titleOverride = w.name }
 
         guard let session,
@@ -39,10 +43,12 @@ class TmuxTerminalController: TerminalController {
         // Preserve focus on the same pane if it still exists in the new tree;
         // otherwise fall back to the first leaf.
         let keepFocus: Ghostty.SurfaceView?
-        if let fs = focusedSurface, newTree.contains(fs) {
+        if preserveFocus, let fs = focusedSurface, newTree.contains(fs) {
             keepFocus = fs
-        } else {
+        } else if preserveFocus {
             keepFocus = newTree.root?.leftmostLeaf()
+        } else {
+            keepFocus = nil
         }
 
         // tmux is authoritative; layout rebuilds must not enter the undo stack.

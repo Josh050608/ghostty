@@ -76,7 +76,12 @@ final class TmuxSessionController {
         // Added or kept windows, in tmux order.
         for w in ev.windows {
             if let existing = windows[w.id] {
-                existing.tmuxUpdate(window: w, nodes: ev.nodes) // Task 9
+                existing.tmuxUpdate(
+                    window: w,
+                    nodes: ev.nodes,
+                    preserveFocus: Self.shouldPreserveFocus(
+                        pending: pendingFocus,
+                        updatingWindowId: w.id)) // Task 9
             } else {
                 addWindow(w, nodes: ev.nodes)
             }
@@ -283,6 +288,18 @@ final class TmuxSessionController {
         // Fully honored (or window-only request, which has nothing to wait
         // for): stop deferring, so a later unrelated resync can't replay it.
         return nil
+    }
+
+    /// A tree replacement normally restores the pane that was focused before
+    /// the layout changed. Do not schedule that stale restore when tmux has
+    /// already announced a different active pane for this window: `apply(_:)`
+    /// replays the pending request after the new pane surface is in the tree.
+    /// Scheduling both asynchronous moves lets the old restore win the race.
+    static func shouldPreserveFocus(
+        pending: PendingFocus?,
+        updatingWindowId: UInt
+    ) -> Bool {
+        pending?.windowId != updatingWindowId
     }
 
     /// Checks whether `candidate` (the (window, pane) pair a
